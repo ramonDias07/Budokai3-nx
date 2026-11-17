@@ -1,0 +1,18 @@
+# B3 USA/Japan — processador padrão ReXGlue/Xenos, saída Deko3D
+asset_pack = false
+asset_pack_build = false
+clock_no_scaling = true
+video_mode_width = 1280
+video_mode_height = 720
+vsync = true
+log_to_file = true
+log_level = "info"
+
+# Present the resolved scene before the game's FXAA when the final pass matches.
+b3_deko_copia_final = true
+# Capture 3D scenes automatically. Press both sticks to capture a frame.
+b3_deko_diagnostico = true
+# Keep per-draw GPU profiling disabled.
+nfsmw_dk_perfil_gpu_s = 0
+# First console comparison: materialize the swap source through the resolve.
+nfsmw_nativo_frontal_perezoso = false
