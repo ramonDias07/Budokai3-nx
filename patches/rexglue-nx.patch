@@ -40,6 +40,21 @@ index d62f871..5e9851c 100644
  };
  
  }  // namespace rex::audio::nx
+diff --git a/include/rex/chrono/chrono.h b/include/rex/chrono/chrono.h
+index d876846..37ebdec 100644
+--- a/include/rex/chrono/chrono.h
++++ b/include/rex/chrono/chrono.h
+@@ -116,8 +116,8 @@ using XSystemClock = detail::NtSystemClock<detail::Domain::Guest>;
+ 
+ namespace std::chrono {
+ 
+-#ifdef __APPLE__
+-// Apple libc++ does not expose clock_time_conversion or clock_cast.
++#if defined(__APPLE__) || (defined(__MINGW32__) && defined(_LIBCPP_VERSION))
++// Apple and LLVM-MinGW libc++ do not expose clock_time_conversion or clock_cast.
+ template <class, class>
+ struct clock_time_conversion {};
+ 
 diff --git a/include/rex/ppc/context.h b/include/rex/ppc/context.h
 index f574d2d..4b1e731 100644
 --- a/include/rex/ppc/context.h
@@ -684,6 +699,20 @@ index 09794c4..9e609c4 100644
  };
  
  }  // namespace rex::x360
+diff --git a/src/audio/CMakeLists.txt b/src/audio/CMakeLists.txt
+index 1260153..f2cedee 100644
+--- a/src/audio/CMakeLists.txt
++++ b/src/audio/CMakeLists.txt
+@@ -13,6 +13,9 @@ add_library(rexaudio OBJECT
+     nop/nop_audio_system.cpp
+ )
+ add_library(rex::audio ALIAS rexaudio)
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND NOT MSVC)
++    target_compile_options(rexaudio PRIVATE -mssse3)
++endif()
+ if(REXGLUE_PLATFORM_SWITCH)
+     # libnx audout backend
+     target_sources(rexaudio PRIVATE switch/switch_audio_system.cpp)
 diff --git a/src/audio/switch/switch_audio_system.cpp b/src/audio/switch/switch_audio_system.cpp
 index 6a9dc8d..97e5f50 100644
 --- a/src/audio/switch/switch_audio_system.cpp
@@ -969,6 +998,21 @@ index 3a1bebb..5c1ec44 100644
      }
      for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
        if (kicked_value & 1) {
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index aa8992e..617315e 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -24,6 +24,10 @@ add_library(rexcore OBJECT
+ )
+ add_library(rex::core ALIAS rexcore)
+ 
++if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND NOT MSVC)
++    set_source_files_properties(memory.cpp PROPERTIES COMPILE_OPTIONS "-mssse3")
++endif()
++
+ if(APPLE)
+     # Apple's libc++ still gates std::jthread/std::stop_token behind the
+     # experimental-library feature flag. Only timer_queue.cpp uses them, and
 diff --git a/src/core/clock.cpp b/src/core/clock.cpp
 index ae72b7a..3e9d50f 100644
 --- a/src/core/clock.cpp
@@ -1132,6 +1176,24 @@ index 5d26022..e619594 100644
    __sync_synchronize();
  }
  
+diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
+index 896dfec..463daaf 100644
+--- a/src/core/threading_win.cpp
++++ b/src/core/threading_win.cpp
+@@ -56,11 +56,13 @@ void raise_thread_name_exception(HANDLE thread, const std::string& name) {
+   info.szName = name.c_str();
+   info.dwThreadID = ::GetThreadId(thread);
+   info.dwFlags = 0;
++#if defined(_MSC_VER)
+   __try {
+     RaiseException(0x406D1388, 0, sizeof(info) / sizeof(ULONG_PTR),
+                    reinterpret_cast<ULONG_PTR*>(&info));
+   } __except (EXCEPTION_EXECUTE_HANDLER) {  // NOLINT
+   }
++#endif
+ }
+ 
+ static void set_thread_name_impl(HANDLE thread, const std::string_view name) {
 diff --git a/src/graphics/pipeline/shader/interpreter.cpp b/src/graphics/pipeline/shader/interpreter.cpp
 index cc726b7..ed90f71 100644
 --- a/src/graphics/pipeline/shader/interpreter.cpp
@@ -1440,6 +1502,29 @@ index ccf5e2a..9226a2e 100644
 +namespace rex::input {
 +void FijarFiltroMando(FiltroMando filtro) { nx::g_filtro_mando.store(filtro, std::memory_order_release); }
 +}  // namespace rex::input
+diff --git a/src/input/xinput/xinput_input_driver.cpp b/src/input/xinput/xinput_input_driver.cpp
+index a6a1da9..45c242a 100644
+--- a/src/input/xinput/xinput_input_driver.cpp
++++ b/src/input/xinput/xinput_input_driver.cpp
+@@ -115,12 +115,12 @@ X_STATUS XinputInputDriver::Setup() {
+   }
+ 
+   module_ = module;
+-  XInputGetCapabilities_ = xigc;
+-  XInputGetState_ = xigs;
+-  XInputGetStateEx_ = xigsEx;
+-  XInputGetKeystroke_ = xigk;
+-  XInputSetState_ = xiss;
+-  XInputEnable_ = xie;
++  XInputGetCapabilities_ = reinterpret_cast<void*>(xigc);
++  XInputGetState_ = reinterpret_cast<void*>(xigs);
++  XInputGetStateEx_ = reinterpret_cast<void*>(xigsEx);
++  XInputGetKeystroke_ = reinterpret_cast<void*>(xigk);
++  XInputSetState_ = reinterpret_cast<void*>(xiss);
++  XInputEnable_ = reinterpret_cast<void*>(xie);
+ 
+   return X_STATUS_SUCCESS;
+ }
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp b/src/kernel/xboxkrnl/xboxkrnl_audio.cpp
 index 5cfbb36..e824cb2 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_audio.cpp

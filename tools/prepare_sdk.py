@@ -12,7 +12,7 @@ SDK_COMMIT = "f961303fe3c6e3a90905b379ff4bf3de9a35a757"
 THIRDPARTY = (
     "cli11", "libmspack", "FFmpeg", "tomlplusplus", "simde", "xxHash", "spdlog", "fmt", "utfcpp",
     "imgui", "sdl3", "o1heap", "vulkan-headers", "vulkan-memory-allocator", "spirv-headers",
-    "spirv-tools", "glslang",
+    "spirv-tools", "glslang", "inja",
 )
 
 

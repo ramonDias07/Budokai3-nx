@@ -1,16 +1,20 @@
 # Desempenho no Switch
 
-As medições abaixo vêm dos últimos logs físicos disponíveis, da build **Deko3D 0.1.38**, em **17 de novembro de 2026**. O console foi testado com **RAM a 1.600 MHz, CPU a 1.400 MHz e GPU a 460 MHz**, conforme informado pelo responsável pelo teste. Esses clocks não são medições do log nem requisitos do port.
+As medições vêm de duas sessões no Switch físico com o **B3deko 0.1.40**, em **17 de novembro de 2026**. O console usava **RAM a 1.600 MHz, CPU a 1.400 MHz e GPU a 460 MHz**, conforme informado pelo responsável pelos testes. A saída do jogo era **1280 × 720**. Os logs não medem os clocks e esses valores não são requisitos do port.
 
-A saída estava em **1280 × 720**. Cada linha representa uma janela de aproximadamente dez segundos registrada pelo Deko3D. A taxa de quadros do renderizador pode diferir da cadência da simulação, que também aparece nos logs de áudio.
+| Recorte dos logs | Janelas de aproximadamente 10 s | FPS médio | Mediana | Metade central das janelas |
+| --- | ---: | ---: | ---: | ---: |
+| Sessões completas, incluindo menus e cenas leves | 279 | 48,6 | 47,2 | 43,8–56,6 |
+| Janelas com pelo menos 200 desenhos por quadro | 193 | 45,9 | 46,2 | 42,2–49,4 |
 
-| Trecho da sessão | Quadros/s | GPU por quadro | Desenhos por quadro |
+O segundo recorte seleciona janelas com mais trabalho de renderização pelo número de desenhos. A taxa é a do renderizador Deko3D. A cadência da simulação pode cair em momentos diferentes.
+
+| Horário | FPS | GPU por quadro | Desenhos por quadro |
 | --- | ---: | ---: | ---: |
-| Diálogo/cena leve, 09:51:35 | 60,0 | 6,41 ms | 7 |
-| Janela de combate pesada, 10:20:27 | 26,5 | 36,65 ms | 395 |
-| Janela seguinte, 10:20:37 | 44,2 | 21,83 ms | 345 |
-| Trecho perto do final da sessão, 10:24:29 | 59,9 | 13,53 ms | 41 |
+| 13:20:27, início da sessão | 60,2 | 5,13 ms | 3 |
+| 14:00:39, menor média em uma janela | 30,8 | 31,65 ms | 373 |
+| 14:19:12 | 47,2 | 20,44 ms | 361 |
+| 14:19:22 | 48,7 | 19,81 ms | 348 |
+| 14:19:32 | 46,2 | 20,87 ms | 406 |
 
-Na janela de 26,5 quadros/s, o desenho da cena consumiu **28,64 ms** na GPU em média e as cópias consumiram **3,54 ms**. O relógio da luta marcou **23,7 a 24,3 atualizações/s** em amostras próximas. O áudio em Ritmo normal ainda avançava com piso de 0,5×. Isso motivou o ajuste de 0.1.39 nos efeitos, preservando a trilha musical em tempo real.
-
-A nova organização de menus e avisos de 0.1.40 foi compilada. Ainda faltam medições físicas dessa revisão. Os resultados da tabela não devem ser extrapolados para toda luta, para clocks de fábrica ou para modos de TV e portátil sem um novo teste.
+Na janela de 30,8 FPS, o desenho da cena consumiu **19,91 ms** e as cópias consumiram **6,10 ms** de GPU por quadro. Nas cenas mais pesadas, vozes ou efeitos ainda podem adiantar em relação à animação com a trilha no modo **Ritmo normal**.
