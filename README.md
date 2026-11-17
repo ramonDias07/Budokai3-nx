@@ -1,6 +1,10 @@
-# Budokai3-nx
+# Budokai3-nx — Dragon Ball Z: Budokai 3 HD para Nintendo Switch
 
-Port não oficial de **Dragon Ball Z: Budokai 3 HD** para Nintendo Switch, baseado na edição Xbox 360 da *Budokai HD Collection*. O ReXGlue recompila o PowerPC em C++ para ARM64. O port processa os comandos gráficos Xenos e os desenha com Deko3D.
+Port homebrew não oficial de **Dragon Ball Z: Budokai 3 HD** para Nintendo Switch, baseado na edição Xbox 360 de *Dragon Ball Z: Budokai HD Collection*. O ReXGlue recompila o código PowerPC do jogo para ARM64. O port processa os comandos gráficos Xenos e renderiza com Deko3D.
+
+[Release v0.1.40](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.40) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
+
+Para começar, baixe **Source code** na release e siga o guia de compilação com seu próprio dump **USA/Japan de Xbox 360**. As ferramentas geram o `B3.nro` e montam a pasta para o SD.
 
 ## Estado do port
 
@@ -49,7 +53,9 @@ Capturas feitas no Switch com a build 0.1.38, mostrando o layout de Dragon Rush 
 
 ## Contribuições
 
-Sugestões, issues e pull requests de otimização são bem-vindos. Para comparar uma mudança, informe a cena, o perfil, os clocks do console e as medições antes e depois. [Contribuidores](CONTRIBUTORS.md)
+Sugestões e pull requests de otimização são bem-vindos. Se você testar no console, conte o que funcionou e abra uma issue caso encontre um problema. Inclua a versão do port, a cena, o perfil gráfico, os clocks do console e, se possível, o trecho relevante do log. Para propor uma otimização, inclua medições antes e depois na mesma cena. [Issues](https://github.com/ramonDias07/Budokai3-nx/issues) · [Contribuidores](CONTRIBUTORS.md)
+
+Se o projeto foi útil, deixe uma estrela no GitHub para acompanhar o repositório.
 
 ## Créditos e referências
 
@@ -60,6 +66,12 @@ Sugestões, issues e pull requests de otimização são bem-vindos. Para compara
 - **hedge-dev**, **devkitPro** e **Khronos** pelas ferramentas usadas na tradução de shaders. [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) · [uam](https://github.com/devkitPro/uam) · [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)
 
 Veja de onde veio cada parte e como outros ports tratam instalação e dados originais em [Referências](docs/referencias.md).
+
+## English overview
+
+**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.40** was tested on physical Switch hardware and features a Dragon Rush prompt adapted to the Switch ABXY layout.
+
+Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. The build tools generate the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.40) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
 ## Licenças e dados do jogo
 
