@@ -16,10 +16,3 @@
 | [Shaolin Monks NX](https://github.com/Thorhax/ShaolinMonks-NX) | ISO do Xbox original ou arquivos extraídos ao lado do NRO. O port confere o hash de `default.xbe`. |
 | [Guitar Hero III (gh3-nx)](https://github.com/guillermedev75/gh3-nx) | Dump Xbox 360 extraído com `default.xex` e `DATA/`. A pessoa gera o pacote em seu computador. O NRO confere o hash do executável na instalação. |
 | Budokai3-nx | O extrator recebe uma ISO USA/Japan e usa o XEX e os dados `us/` do Budokai 3. O build gera C++, shaders e NRO localmente. |
-
-
-## Outro port de Budokai 3 para Switch
-
-O Budokai-NX de alexyt2021es também usa Deko3D. Seu backend é baseado no Bejeweled3-nx. O README descreve uma cena interna de 960 × 540 com saída em 1280 × 720. A árvore pública também registra uma experiência de reaproveitamento de buffers imutáveis de vértices e índices, mantidos vivos até a GPU terminar de usá-los. [Budokai-NX](https://gitlab.com/alexyt2021es/Budokai-NX) · [Notas técnicas de reutilização de buffers](https://gitlab.com/alexyt2021es/Budokai-NX/-/blob/main/switch/PERFORMANCE-04851.md)
-
-No B3deko 0.1.40, o ajuste de resolução do menu muda um passe de desfoque. Reduzir a cena 3D preservando o HUD em 720p e reaproveitar buffers entre comandos são duas experiências para medir no backend deste port. Os dois projetos usam caminhos diferentes de renderização, de modo que os ganhos precisam ser medidos no Switch.
