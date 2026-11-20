@@ -1,4 +1,4 @@
-# B3 USA/Japan — processador padrão ReXGlue/Xenos, saída Deko3D
+# B3 USA/Japan - standard ReXGlue/Xenos processor, Deko3D output
 asset_pack = false
 asset_pack_build = false
 clock_no_scaling = true
@@ -7,6 +7,10 @@ video_mode_height = 720
 vsync = true
 log_to_file = true
 log_level = "info"
+switch_contador_fps = true
+# Rumble and its strength (0.25 = 25%).
+input_vibracion = true
+input_vibracion_fuerza = 0.250000
 
 # Present the resolved scene before the game's FXAA when the final pass matches.
 b3_deko_copia_final = true
@@ -16,3 +20,38 @@ b3_deko_diagnostico = true
 nfsmw_dk_perfil_gpu_s = 0
 # First console comparison: materialize the swap source through the resolve.
 nfsmw_nativo_frontal_perezoso = false
+
+# Profile: default, performance or nooverclock. A DOCK overlay (internal 720, output 1080) is added automatically when docked.
+b3_perfil = "performance"
+# Values saved by the user over each profile's factory values ("key=value;key=value"). Empty = factory values.
+# Keys: tempo, interna, saida, sombras, desfoque, bloom, dof, boost, copias, z.
+b3_perfil_default = ""
+b3_perfil_performance = ""
+b3_perfil_nooverclock = "tempo=40;saida=720;dof=720"
+# Game time: 60 (original timing), 55, 50, 45, 40, 35 or 30 FPS. Live.
+b3_tempo_jogo_fps = 40
+# Used internally by the game time (60 -> speed 0 and limit 60; otherwise speed 1 and limit = FPS).
+b3_velocidade_jogo = 1
+b3_limite_fps_luta = 40
+# Internal render resolution (height): 720, 540, 360 or 0 = AUTO. Live; never above the output height.
+b3_deko_resolucao_interna = 720
+# Output height: docked 1080, 900, 720 or 540; handheld 720, 540 or 360. Invalid for the mode = the mode maximum. Live.
+b3_deko_resolucao_saida = 1080
+# Upscaler when internal < output: 0 linear, 1 CAS, 2 FSR1. Live.
+b3_deko_ampliador = 0
+# CAS sharpness, 0..100. Live.
+b3_deko_nitidez = 50
+# Bloom and fighter shadows (the profile sets them on startup).
+b3_deko_bloom = false
+b3_deko_sombras_projetadas = false
+# Color handover: swap images instead of copying on whole-target resolves. Live.
+b3_deko_handover_cor = false
+# Skip a resolve identical to the previous one when nothing changed. Live.
+b3_deko_pular_resolve_repetido = false
+# Relaxed vsync with a fixed swap interval (no 33 -> 67 ms spikes). Live.
+b3_deko_vsync_relaxado = true
+# b3_gpu_boost is decided by the profile (DEFAULT and PERFORMANCE on, NO OVERCLOCK off); not set here.
+# Treat invalid (type 0) fetch constants as textures; needed for fighter shadows.
+b3_deko_fetch_invalido = true
+# Fighter shadow depth bias (0 = original, 16..256). Stops stripe flicker on the ground. Live.
+b3_deko_sombra_sesgo = 64

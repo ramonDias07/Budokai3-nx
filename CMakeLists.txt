@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Budokai3NX VERSION 0.1.40 LANGUAGES C CXX)
+project(Budokai3NX VERSION 0.1.46 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,7 +15,7 @@ if(NOT EXISTS "${BUDOKAI_GENERATED_DIR}/sources.cmake")
 endif()
 add_subdirectory("${REXSDK_DIR}" "${CMAKE_BINARY_DIR}/rexglue")
 include("${BUDOKAI_GENERATED_DIR}/sources.cmake")
-set_source_files_properties(${GENERATED_SOURCES} PROPERTIES
+set_source_files_properties(${GENERATED_SOURCES} "${BUDOKAI_GENERATED_DIR}/b3_battle_delta.cpp" PROPERTIES
     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/app/src/gcc_codegen_compat.h")
 
 add_executable(budokai3_nx
@@ -23,10 +23,12 @@ add_executable(budokai3_nx
     app/src/graphics.cpp
     app/src/battle_audio.cpp
     app/src/b3_usa_dispatch.cpp
+    app/src/game_speed.cpp
+    app/generated/b3_battle_delta.cpp
     app/src/nfsmw_nativo_shaders.cpp
     app/src/nfsmw_shader_library.cpp
     ${GENERATED_SOURCES})
-target_include_directories(budokai3_nx PRIVATE "${BUDOKAI_GENERATED_DIR}" "${REXSDK_DIR}/thirdparty/xxHash")
+target_include_directories(budokai3_nx PRIVATE "${BUDOKAI_GENERATED_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/app/src" "${REXSDK_DIR}/thirdparty/xxHash")
 target_compile_options(budokai3_nx PRIVATE -fno-strict-aliasing -ffp-contract=off)
 target_link_libraries(budokai3_nx PRIVATE rex::runtime rex::gpu-xenos)
 rexglue_switch_configure_target(budokai3_nx GPU_PLUGINS xenos)

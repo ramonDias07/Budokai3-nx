@@ -1,4 +1,5 @@
 #include "graphics.h"
+#include "game_speed.h"
 #include "dragon_rush_layout.h"
 
 #include "nfsmw_nativo_shaders.h"
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -14,9 +16,12 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <pthread.h>
 
 #include <rex/audio/audio_system.h>
 #include <rex/cvar.h>
@@ -28,6 +33,8 @@
 #include <rex/system/xmemory.h>
 #include <rex/ui/deko3d/glsl.h>
 #include <rex/ui/deko3d/presentador.h>
+#include <rex/ui/switch_apm.h>
+#include <rex/ui/switch_saltynx.h>
 #include <rex/x360/deko/render.h>
 #include <rex/x360/shader_entry.h>
 #include <rex/x360/xenos.h>
@@ -49,10 +56,93 @@ REXCVAR_DEFINE_BOOL(b3_deko_desfoque_leve, true, "Budokai 3",
                     "Usa cinco amostras no desfoque de profundidade original.");
 REXCVAR_DEFINE_BOOL(b3_deko_sombras_projetadas, true, "Budokai 3",
                     "Compoe as sombras projetadas pelos lutadores.");
+// 0.1.46: the projection of the fighter shadows redraws the ground over the restored depth with another vertex shader;
+// on the Switch the Z does not match bit for bit and the shadow fails in rows that change every frame (the flicker,
+// captures 4246/4300/4496 of the 0.1.44 test). A small bias towards the camera only on that draw.
+REXCVAR_DEFINE_INT32(b3_deko_sombra_sesgo, 64, "Budokai 3",
+                     "Desloca a projecao da sombra dos lutadores para a camera (unidades de profundidade; a "
+                     "inclinacao acompanha). 0 = como antes (sombra piscando em listras). Ao vivo.");
+REXCVAR_DEFINE_INT32(b3_limite_fps_luta, 60, "Budokai 3",
+                     "Teto de FPS na luta: 60 (sem teto), 55, 50, 45, 40, 35 ou 30.");
+
+extern "C" void RexSwitchPerfIntervaloSwap(unsigned vblanks);
+
+// Build 0.1.43. b3_deko_resolucao_interna (SDK, destinos.cpp) is live now; b3::PedirResolucaoInterna sets it.
+REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
+// Official GPU boost (460.8 MHz handheld profile through apm, RAM clock untouched; switch_apm.cpp). Live.
+REXCVAR_DEFINE_BOOL(b3_gpu_boost, false, "Budokai 3",
+                    "Perfil oficial de GPU 460.8 MHz (apm) so no portatil; no dock nao faz nada. Desligar restaura o "
+                    "perfil anterior. Ao vivo.");
+
 REXCVAR_DEFINE_BOOL(b3_deko_copia_final, true, "Budokai 3",
                     "Usa a imagem anterior ao FXAA na copia final do Budokai 3.");
 
 namespace b3 {
+
+void PedirResolucaoInterna(int altura) {
+  if (altura != 0 && altura != 720 && altura != 540 && altura != 360) {
+    REXLOG_WARN("[B3 Deko escala] PedirResolucaoInterna({}) invalida: ignorada", altura);
+    return;
+  }
+  REXCVAR_SET(b3_deko_resolucao_interna, altura);  // read at each frame boundary by the renderer
+}
+
+namespace {
+std::atomic<bool> g_gpu_boost_ocupado{false};
+}  // namespace
+
+bool AplicarGpuBoost(bool ligar) {
+  const bool dock = rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console);
+  if (!ligar) {
+    // A request to turn it on is still being applied in the background: "off" now would find nothing to restore and
+    // the thread would turn it on afterwards, stuck until restart (0.1.44, log 005: true->false, then "ligado").
+    // Return false so TickGpuBoost tries again 30 swaps later.
+    if (g_gpu_boost_ocupado.load()) {
+      return false;
+    }
+    if (RexSwitchApmAtivo()) {
+      RexSwitchApmRestaurar();
+      REXLOG_INFO("[B3 gpu boost] desligado: perfil anterior restaurado");
+    }
+    return true;
+  }
+  if (dock) {
+    REXLOG_INFO("[B3 gpu boost] ignorado: console no dock (so vale no portatil)");
+    return false;
+  }
+  if (RexSwitchApmAtivo()) {
+    return true;
+  }
+  if (g_gpu_boost_ocupado.exchange(true)) {
+    return false;  // a request is still being checked (it polls the clocks for ~1.5 s)
+  }
+  // Off the swap thread: RexSwitchApmAplicar waits for the clocks (up to a few seconds) and checks the memory clock
+  // did not move; if it did, it falls back to the original profile (see switch_apm.cpp).
+  // pthread, not std::thread: std::thread throws std::system_error "Function not implemented" on this toolchain
+  // (the 0.1.43 NO OVERCLOCK crash, rex_crash.log: std::terminate in AplicarGpuBoost).
+  pthread_t hilo;
+  const int rc = pthread_create(&hilo, nullptr, [](void*) -> void* {
+    RexSwitchApmPedirGpuMhz(460);
+    RexSwitchApmAplicar();
+    REXLOG_INFO("[B3 gpu boost] ligado: {}", RexSwitchApmAtivo() ? "GPU 460.8 MHz ativa (memoria intacta)"
+                                                                 : "nao aplicado (ver [apm] no log: sem perfil seguro)");
+    if (!REXCVAR_GET(b3_gpu_boost) && RexSwitchApmAtivo()) {
+      // Turned off from the menu while this was being applied.
+      RexSwitchApmRestaurar();
+      REXLOG_INFO("[B3 gpu boost] desligado logo apos ligar (pedido durante a aplicacao): perfil anterior restaurado");
+    }
+    g_gpu_boost_ocupado.store(false);
+    return nullptr;
+  }, nullptr);
+  if (rc != 0) {
+    REXLOG_WARN("[B3 gpu boost] pthread_create falhou ({}): boost nao aplicado", rc);
+    g_gpu_boost_ocupado.store(false);
+    return false;
+  }
+  pthread_detach(hilo);
+  return true;
+}
+
 namespace {
 
 using namespace rex::graphics;
@@ -60,6 +150,47 @@ namespace x360 = rex::x360;
 using Provider = rex::deko3d::ProveedorDeko3d;
 using ShaderEntry = nfsmw::nativo::EntradaShader;
 constexpr uint64_t kCaptureButtons = HidNpadButton_StickL | HidNpadButton_StickR;
+
+// Battle frame cap. 30 uses the exact swap interval of two vblanks; 55/50/45/40/35 present
+// as fast as allowed and sleep to a monotonic deadline (no catch-up bursts).
+class BattleFramePacer {
+ public:
+  void Pace() {
+    const int phase = PublishedPhase();
+    const int requested = REXCVAR_GET(b3_limite_fps_luta);
+    const int limit = TimedScene(phase) &&
+                              (requested == 30 || requested == 35 || requested == 40 || requested == 45 || requested == 50 || requested == 55)
+                          ? requested
+                          : 60;
+    if (limit != limit_) {
+      REXLOG_INFO("[B3 limite fps] efetivo={} (fase={} pedido={})", limit, phase, requested);
+      limit_ = limit;
+      deadline_ns_ = 0;
+      RexSwitchPerfIntervaloSwap(limit == 30 ? 2 : 0);
+    }
+    if (limit == 60 || limit == 30) return;
+    const uint64_t period = 1000000000ull / uint64_t(limit);
+    const uint64_t now = NowNs();
+    if (deadline_ns_ == 0 || now > deadline_ns_ + period) {
+      deadline_ns_ = now + period;  // late or first frame: restart, no catch-up
+      return;
+    }
+    if (now < deadline_ns_) svcSleepThread(int64_t(deadline_ns_ - now));
+    deadline_ns_ += period;
+  }
+
+ private:
+  static uint64_t NowNs() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+  int limit_ = 60;
+  uint64_t deadline_ns_ = 0;
+
+ public:
+  // The frame period the cap aims at, for the automatic internal resolution (16.7 ms without a cap).
+  double PeriodMs() const { return limit_ >= 30 && limit_ < 60 ? 1000.0 / double(limit_) : 16.7; }
+};
 constexpr uint64_t kAudioCaptureButtons = kCaptureButtons | HidNpadButton_ZL | HidNpadButton_ZR;
 constexpr size_t kMaxPasses = 128;
 constexpr size_t kMaxCopyRows = 96;
@@ -182,9 +313,13 @@ class DekoCommandProcessor final : public CommandProcessor {
     }
     const bool presented = render_->Presentar(graphics_system_->presenter(), swap, width, height);
     if (!presented) ++missed_swaps_;
+    pacer_.Pace();
+    render_->FijarPeriodoAlvo(pacer_.PeriodMs());
+    TickGpuBoost();
     const bool manual_scene = ManualCaptureRequested();
     detailed_capture_ = manual_scene ? swaps_ + 1 : 0;
     if (manual_scene) {
+      world_shadow_logs_ = 0;
       state_capture_until_ = swaps_ + (REXCVAR_GET(b3_deko_diagnostico_completo) ? 3 : 1);
       scene_capture_ = swaps_ + 1;
       REXLOG_INFO("[B3 Deko captura] quadro={} gatilho=controle desenhos_3d={} VS_3d_ausentes={}",
@@ -200,6 +335,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     unknown_ps_draws_ += frame_.unknown_ps;
     copy_attempts_ += frame_.copies;
     failed_copies_ += frame_.failed_copies;
+    previous_combat_frame_ = frame_.combat_post;
     frame_ = {};
     bloom_blur_draw_ = false;
     shadow_resolve_ = 0;
@@ -225,9 +361,9 @@ class DekoCommandProcessor final : public CommandProcessor {
                   stats.rechazados, unknown_shaders_, unknown_vs_draws_, unknown_ps_draws_,
                   copy_attempts_, failed_copies_, composite_copies_, composite_attempts_, scene_clears_);
       REXLOG_INFO("[B3 Deko desempenho] swap={} finais_omitidos={} leituras_bloom_omitidas={} "
-                  "bloom_omitido={} z_restaurado={} dof_leve_pedidos={} sombras_omitidas={}",
+                  "bloom_omitido={} z_restaurado={} dof_leve_pedidos={} sombras_omitidas={} sombras_com_sesgo={}",
                   swaps_, desenhos_finais_omitidos_, leituras_bloom_omitidas_, bloom_omitidos_, restaura_z_,
-                  dof_leve_pedidos_, sombras_omitidas_);
+                  dof_leve_pedidos_, sombras_omitidas_, sombras_com_sesgo_);
     }
   }
 
@@ -240,7 +376,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     }
     render_ = std::make_unique<x360::RenderDk>(*provider, memory_);
     diagnostic_ = REXCVAR_GET(b3_deko_diagnostico);
-    REXLOG_INFO("[B3 Deko build] 0.1.40: menus e avisos no apresentador Deko");
+    REXLOG_INFO("[B3 Deko build] 0.1.46: boost sem travar, sombra sem listras (sesgo), audio sem estalos, padroes do perfil PERFORMANCE");
     direct_composite_ = REXCVAR_GET(b3_deko_copia_final);
     REXLOG_INFO("Xenos/Deko: copia final sem FXAA {}", direct_composite_ ? "ativada" : "desativada");
     if (diagnostic_) {
@@ -494,12 +630,27 @@ class DekoCommandProcessor final : public CommandProcessor {
       restaura_z_ += restored_depth;
     }
     const uint32_t depth_control = r[XE_GPU_REG_RB_DEPTHCONTROL];
+    if (detailed && (depth_control & 1u) && world_shadow_logs_ < 64) {
+      ++world_shadow_logs_;
+      REXLOG_INFO("[B3 Deko sombra mundo] swap={} draw={} vs={:016X} ps={:016X} depth={:08X} stencil={:08X}/{:08X} cor_mask={:X}",
+                  swaps_ + 1, frame_.draws, vs_hash, ps_hash, depth_control, r[XE_GPU_REG_RB_STENCILREFMASK],
+                  r[XE_GPU_REG_RB_STENCILREFMASK_BF], r[XE_GPU_REG_RB_COLOR_MASK]);
+    }
     // Keep the shadow pass's depth/stencil tests and omit only its color writes.
     const bool skip_shadow = !sombras_projetadas_ && vs_hash == kShadowProjectVertex &&
                              ps_hash == kShadowProjectPixel && shadow_resolve_ && source == shadow_resolve_ &&
                              r[XE_GPU_REG_RB_SURFACE_INFO] == 0x14000500 &&
                              r[XE_GPU_REG_RB_COLOR_INFO] == 0 && r[XE_GPU_REG_RB_COLOR_MASK] == 7;
     draw.omitir_cor = skip_shadow;
+    {
+      // Shadow projection (Z LEQUAL + stencil EQUAL 1 over the restored depth): pull it towards the camera.
+      const int sesgo = std::clamp(REXCVAR_GET(b3_deko_sombra_sesgo), 0, 4096);
+      const bool projecao = sesgo && vs_hash == kShadowProjectVertex && ps_hash == kShadowProjectPixel &&
+                            (depth_control & 2u);
+      draw.sesgo_b3[0] = projecao ? -float(sesgo) : 0.0f;
+      draw.sesgo_b3[1] = projecao ? -2.0f : 0.0f;
+      sombras_com_sesgo_ += projecao;
+    }
     draw.texturas_dinamicas = ps_hash == kStagePreviewPixel;
     if (draw.texturas_dinamicas) {
       const auto u = r.GetTextureFetch(1);
@@ -610,7 +761,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     if (hud_capture && !hud_dumps_) render_->VolcarCorHud(color_info, 1280, frame_.draws, false);
     const bool model_capture = geometry && color_info == 0 && (surface_width == 1280 || surface_width == 640) &&
         (std::ranges::find(kModelEffectPixels, ps_hash) != kModelEffectPixels.end() ||
-         vs_hash == 0xFDF960B5D7869030ULL || vs_hash == 0x34E48B1366739F9BULL);
+         vs_hash == 0xFDF960B5D7869030ULL || vs_hash == 0x4D5BDBCCEDEB1BB5ULL || vs_hash == 0x34E48B1366739F9BULL);
     if (full_capture && vs && draw.vs && (hud_capture || model_capture)) {
       if (!vs->vertex_probe_checked) {
         rex::string::StringBuffer disassembly;
@@ -829,6 +980,19 @@ class DekoCommandProcessor final : public CommandProcessor {
   }
 
  private:
+  // b3_gpu_boost, live: re-evaluated every 30 swaps and on a dock change (handheld only; docked it turns itself off, and
+  // comes back on undocking while the cvar is on).
+  void TickGpuBoost() {
+    if (swaps_ % 30 != 1) return;
+    const bool dock = rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console);
+    const bool quer = REXCVAR_GET(b3_gpu_boost) && !dock;
+    if (quer == gpu_boost_estado_) return;
+    if (AplicarGpuBoost(quer)) {
+      gpu_boost_estado_ = quer;
+    }
+  }
+  bool gpu_boost_estado_ = false;
+
   void UpdateOptions() {
     const uint32_t options = options_.load(std::memory_order_relaxed);
     const bool reduzir = (options & kReduzirCopias) != 0;
@@ -1202,8 +1366,9 @@ class DekoCommandProcessor final : public CommandProcessor {
   int dof_height_ = 720;
   bool sombras_projetadas_ = true;
   bool reported_map_distortion_ = false, reported_switch_rush_ = false;
-  uint64_t dof_leve_pedidos_ = 0, sombras_omitidas_ = 0;
+  uint64_t dof_leve_pedidos_ = 0, sombras_omitidas_ = 0, sombras_com_sesgo_ = 0;
   bool model_redraw_ = false, model_checkpoint_ = false;
+  bool previous_combat_frame_ = false;
   uint32_t shadow_resolve_ = 0, hud_traces_ = 0, effect_traces_ = 0;
   std::array<uint32_t, RegisterFile::kRegisterCount> postprocess_registers_;
   std::optional<x360::PeticionDibujo> composite_draw_;
@@ -1225,6 +1390,8 @@ class DekoCommandProcessor final : public CommandProcessor {
   uint32_t unsampled_draws_ = 0, scene_clear_fallbacks_ = 0;
   uint64_t scene_capture_ = 0;
   uint64_t detailed_capture_ = 0;
+  BattleFramePacer pacer_;
+  uint32_t world_shadow_logs_ = 0;
   uint32_t hud_dumps_ = 0;
   uint32_t dragon_rush_dumps_ = 0;
   uint32_t scene_checkpoints_ = 0;

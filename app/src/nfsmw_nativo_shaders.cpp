@@ -402,28 +402,14 @@ const EntradaShader* ShadersNativos::Identificar(bool vertices,
     }
   }
 
-  // Vertex shaders arrive patched: a mismatch is normal.
-  const bool avisar = d.avisos < kMaxAvisos && !vertices;
+  // Unidentified shaders (vertex or pixel): report the closest containers of the same length, so a
+  // near-identical variant (a few words nulled by D3D or by a different pixel shader) is easy to recipe
+  // in tools/shader_layout.json ("template" + "xor" over those words).
+  const bool avisar = d.avisos < kMaxAvisos;
   if (elegido) {
     ++d.estadisticas.identificados;
     if (coincidencias > 1) {
       ++d.estadisticas.ambiguos;
-    }
-    if (avisar && vertices) {
-      // What D3D has patched in each fetch: it becomes the vertex input.
-      ++d.avisos;
-      std::string detalle;
-      for (const ElementoVertice& elemento : elegido->elementos) {
-        const size_t p = size_t(elemento.instruccion) * 3;
-        const uint32_t d0 = microcodigo[p], d1 = microcodigo[p + 1], d2 = microcodigo[p + 2];
-        const uint32_t fetch = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 0x3);
-        const int32_t offset = int32_t(d2 << 1) >> 9;
-        detalle += fmt::format(" {}{}:f{}/fmt{}/z{}/o{}{}", kUsos[elemento.uso & 0xF],
-                               elemento.indice_uso, fetch, (d1 >> 16) & 0x3F, d2 & 0xFF, offset,
-                               ((d1 >> 30) & 0x1) ? "/mini" : "");
-      }
-      REXLOG_INFO("[nativo] C5a: VS n{} ({} palabras, {} coincidencias):{}", elegido->numero,
-                  microcodigo.size(), coincidencias, detalle);
     }
   } else {
     ++d.estadisticas.sin_identificar;
@@ -434,12 +420,11 @@ const EntradaShader* ShadersNativos::Identificar(bool vertices,
                   "({} contenedores de ese tipo y longitud)",
                   vertices ? "vertex" : "pixel", microcodigo.size(), clave.huella,
                   c != d.candidatos.end() ? c->second.size() : 0);
-      // Diagnostics: which words change against the containers of the same
-      // length (incoming / container original, without the mask).
-      for (size_t k = 0; c != d.candidatos.end() && k < c->second.size() && k < 2; ++k) {
+      // Diagnostics: which words change against the containers of the same length (masked incoming
+      // microcode / container microcode). Only the closest two are reported.
+      std::vector<std::pair<uint32_t, std::string>> cercanos;
+      for (size_t k = 0; c != d.candidatos.end() && k < c->second.size(); ++k) {
         const EntradaShader& e = d.entradas[c->second[k]];
-        const auto& o = e.shader->original;
-        const size_t virtuales = size_t(o[4]) << 24 | size_t(o[5]) << 16 | size_t(o[6]) << 8 | o[7];
         std::string diferencias;
         uint32_t cuantas = 0;
         for (size_t i = 0; i < microcodigo.size(); ++i) {
@@ -454,19 +439,23 @@ const EntradaShader* ShadersNativos::Identificar(bool vertices,
             continue;
           }
           if (++cuantas <= 24) {
-            const size_t b = virtuales + i * 4;
-            const uint32_t original = uint32_t(o[b]) << 24 | uint32_t(o[b + 1]) << 16 |
-                                      uint32_t(o[b + 2]) << 8 | o[b + 3];
-            diferencias += fmt::format(" {}:{:08X}/{:08X}", i, microcodigo[i], original);
+            diferencias += fmt::format(" {}:{:08X}/{:08X}", i, microcodigo[i], e.microcodigo[i]);
           }
         }
         std::string fetch;
         for (const ElementoVertice& elemento : e.elementos) {
           fetch += fmt::format(" {}", elemento.instruccion);
         }
-        REXLOG_WARN("[nativo] C5a:   frente a n{}: {} palabras distintas; fetch en las "
-                    "instrucciones{}:{}",
-                    e.numero, cuantas, fetch, diferencias);
+        cercanos.emplace_back(cuantas, fmt::format("frente a n{}: {} palabras distintas{}; fetch en las "
+                                                   "instrucciones{}:{}",
+                                                   e.numero, cuantas,
+                                                   cuantas <= 8 ? " (variante casi identica: receta en shader_layout.json)" : "",
+                                                   fetch, diferencias));
+      }
+      std::stable_sort(cercanos.begin(), cercanos.end(),
+                       [](const auto& x, const auto& y) { return x.first < y.first; });
+      for (size_t k = 0; k < cercanos.size() && k < 2; ++k) {
+        REXLOG_WARN("[nativo] C5a:   {}", cercanos[k].second);
       }
     }
   }

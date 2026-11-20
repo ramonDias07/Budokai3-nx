@@ -16,3 +16,12 @@
 | [Shaolin Monks NX](https://github.com/Thorhax/ShaolinMonks-NX) | ISO do Xbox original ou arquivos extraídos ao lado do NRO. O port confere o hash de `default.xbe`. |
 | [Guitar Hero III (gh3-nx)](https://github.com/guillermedev75/gh3-nx) | Dump Xbox 360 extraído com `default.xex` e `DATA/`. A pessoa gera o pacote em seu computador. O NRO confere o hash do executável na instalação. |
 | Budokai3-nx | O extrator recebe uma ISO USA/Japan e usa o XEX e os dados `us/` do Budokai 3. O build gera C++, shaders e NRO localmente. |
+
+## Outro port de Budokai 3 para Switch
+
+O **Budokai-NX** de alexyt2021es é outro port de Budokai 3 para o Switch, com Deko3D. O Budokai3-nx é um projeto independente: o renderizador e o código do port não vêm dele. O que foi estudado e usado está listado abaixo.
+
+- **Reutilização de buffers (0.1.41).** O repositório público do Budokai-NX registra uma experiência de reaproveitamento de buffers imutáveis de vértices e índices, mantidos vivos até a GPU terminar de usá-los. As notas foram estudadas como referência. O renderizador Deko3D já tinha um cache de geometria entre fotogramas herdado do SDK NX e do nfsmw-nx; a 0.1.41 o estendeu aos buffers contíguos de *fetch* manual de vértices (até 512 KiB), em código deste port. [Notas técnicas de reutilização de buffers](https://gitlab.com/alexyt2021es/Budokai-NX/-/blob/main/switch/PERFORMANCE-04851.md)
+- **Delta time (0.1.42).** A velocidade real da luta foi portada do Budokai-NX v0.4 (Unknown, licença MIT), com adaptações para este port (passo `0x8238A60C`, cópia instrumentada de `sub_820FC260`, apenas nas fases de luta). Os cabeçalhos de `app/src/frame_delta.h`, `app/src/game_speed.cpp` e `tools/prepare_battle_delta.py` registram a origem. [Budokai-NX](https://gitlab.com/alexyt2021es/Budokai-NX)
+
+Os ganhos de qualquer técnica precisam ser medidos no Switch com este port; veja [Desempenho](performance.md).

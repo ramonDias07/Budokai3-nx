@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iterator>
 #include <mutex>
@@ -29,9 +32,27 @@
 extern const rex::PPCImageInfo PPCImageConfig;
 REXCVAR_DECLARE(bool, switch_atajo_perfil_app);
 REXCVAR_DECLARE(bool, switch_contador_fps);
+REXCVAR_DECLARE(int32_t, b3_velocidade_jogo);
+REXCVAR_DECLARE(int32_t, b3_limite_fps_luta);
+REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
+REXCVAR_DECLARE(int32_t, b3_deko_resolucao_saida);
+REXCVAR_DECLARE(int32_t, b3_deko_ampliador);
+REXCVAR_DECLARE(int32_t, audio_switch_tramas_en_cola);
 REXCVAR_DEFINE_BOOL(b3_deko_musica_independente, true, "Budokai 3",
                     "Musica em tempo real. Desligue para comparar com a mistura da 0.1.32. Requer reiniciar.");
 REXCVAR_DEFINE_INT32(b3_audio_atraso_ms, 0, "Budokai 3", "Atraso da mistura de efeitos em milissegundos.");
+
+REXCVAR_DEFINE_INT32(b3_tempo_jogo_fps, 45, "Budokai 3",
+                     "Tempo de jogo: 60 (original), 55, 50, 45, 40, 35 ou 30 FPS. 60 = b3_velocidade_jogo 0; outro = tempo real "
+                     "com teto nesse FPS na luta. Ao vivo.");
+REXCVAR_DEFINE_STRING(b3_perfil, "", "Budokai 3",
+                      "Perfil ativo: default, performance ou nooverclock. Vazio (config antiga) = default.");
+REXCVAR_DEFINE_STRING(b3_perfil_default, "", "Budokai 3",
+                      "Ajustes salvos do perfil DEFAULT sobre os valores de fabrica: chave=valor;chave=valor.");
+REXCVAR_DEFINE_STRING(b3_perfil_performance, "", "Budokai 3",
+                      "Ajustes salvos do perfil PERFORMANCE sobre os valores de fabrica: chave=valor;chave=valor.");
+REXCVAR_DEFINE_STRING(b3_perfil_nooverclock, "", "Budokai 3",
+                      "Ajustes salvos do perfil NO OVERCLOCK sobre os valores de fabrica: chave=valor;chave=valor.");
 
 namespace {
 constexpr char kProfilesBind[] = "bind_b3_deko_profiles";
@@ -51,35 +72,6 @@ constexpr MenuShortcut kMenuShortcuts[] = {
     {HidNpadButton_L | HidNpadButton_R | HidNpadButton_Left, Menu::kAchievements},
 };
 
-struct Preset {
-  const char* name;
-  uint32_t options;
-};
-
-constexpr uint32_t kBaseOptions = b3::kReduzirCopias | b3::kRestaurarZ;
-constexpr Preset kPresets[] = {
-    {"QUALIDADE",
-     kBaseOptions | b3::kBloom | b3::kSombrasProjetadas},
-    {"EQUILIBRADO",
-     kBaseOptions | b3::kBloom | b3::kSombrasProjetadas | b3::kDesfoqueLeve},
-    {"DESEMPENHO",
-     kBaseOptions | b3::kDesfoqueLeve},
-};
-
-struct GraphicsSetting {
-  const char* label;
-  const char* cvar;
-  b3::DekoOption option;
-};
-
-constexpr GraphicsSetting kSettings[] = {
-    {"SOMBRAS PROJETADAS", "b3_deko_sombras_projetadas", b3::kSombrasProjetadas},
-    {"BRILHO DA CENA", "b3_deko_bloom", b3::kBloom},
-    {"DESFOQUE LEVE", "b3_deko_desfoque_leve", b3::kDesfoqueLeve},
-    {"REDUZIR COPIAS DA GPU", "b3_deko_reduzir_copias", b3::kReduzirCopias},
-    {"RESTAURAR PROFUNDIDADE", "b3_deko_restaurar_z", b3::kRestaurarZ},
-};
-
 int NextIndex(int index, int size, int direction) {
   return (index + size + direction) % size;
 }
@@ -93,24 +85,262 @@ std::string MenuText(std::string_view source, size_t max_columns) {
   return text;
 }
 
+// First row of a scrolling window of `visible` rows that keeps `row` inside it.
+int WindowStart(int row, int count, int visible) {
+  return std::clamp(row - visible / 2, 0, std::max(0, count - visible));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Profiles. The cvars are always the truth; options_ mirrors them for the renderer. A profile is its factory values plus
+// the overrides saved in b3_perfil_<profile> ("key=value;key=value"). DOCK is an overlay (internal 720, output 1080).
+// ---------------------------------------------------------------------------------------------------------------------
+enum Key { kTempo, kInterna, kSaida, kSombras, kDesfoque, kBloom, kDof, kBoost, kCopias, kZ, kKeyCount };
+
+struct ProfileKey {
+  const char* id;
+  const char* cvar;
+};
+
+constexpr ProfileKey kKeys[kKeyCount] = {
+    {"tempo", "b3_tempo_jogo_fps"},
+    {"interna", "b3_deko_resolucao_interna"},
+    {"saida", "b3_deko_resolucao_saida"},
+    {"sombras", "b3_deko_sombras_projetadas"},
+    {"desfoque", "b3_deko_desfoque_leve"},
+    {"bloom", "b3_deko_bloom"},
+    {"dof", "b3_deko_desfoque_resolucao"},
+    {"boost", "b3_gpu_boost"},
+    {"copias", "b3_deko_reduzir_copias"},
+    {"z", "b3_deko_restaurar_z"},
+};
+
+struct ProfileDef {
+  const char* id;
+  const char* name;
+  const char* cvar;
+  const char* help;
+  const char* factory[kKeyCount];
+};
+
+//                                   tempo   interna saida   sombras  desfoque bloom    dof    boost    copias  z
+constexpr ProfileDef kProfiles[] = {
+    {"default", "DEFAULT", "b3_perfil_default",
+     "BALANCED LOOK AND SPEED: 45 FPS, FIGHTER SHADOWS ON, NO BLOOM, 720P, GPU BOOST IN HANDHELD",
+     {"45", "720", "1080", "true", "false", "false", "720", "true", "true", "true"}},
+    {"performance", "PERFORMANCE", "b3_perfil_performance",
+     "LIGHTER LOAD: 40 FPS, NO SHADOWS OR BLOOM, LIGHTWEIGHT BLUR, GPU BOOST IN HANDHELD. USE IT IF DEFAULT DROPS FRAMES",
+     {"40", "720", "1080", "false", "true", "false", "720", "true", "true", "true"}},
+    {"nooverclock", "NO OVERCLOCK", "b3_perfil_nooverclock",
+     "FOR STOCK CLOCKS: 960X540 INTERNAL, 720P OUTPUT, 40 FPS, NO SHADOWS OR BLOOM, NO GPU BOOST",
+     {"40", "540", "720", "false", "true", "false", "720", "false", "true", "true"}},
+};
+constexpr int kProfileCount = int(std::size(kProfiles));
+
+using Overrides = std::vector<std::pair<std::string, std::string>>;
+
+Overrides ParseOverrides(std::string_view text) {
+  Overrides result;
+  while (!text.empty()) {
+    const size_t end = text.find(';');
+    const std::string_view item = text.substr(0, end);
+    const size_t eq = item.find('=');
+    if (eq != std::string_view::npos && eq > 0) {
+      result.emplace_back(std::string(item.substr(0, eq)), std::string(item.substr(eq + 1)));
+    }
+    if (end == std::string_view::npos) break;
+    text.remove_prefix(end + 1);
+  }
+  return result;
+}
+
+std::string JoinOverrides(const Overrides& overrides) {
+  std::string text;
+  for (const auto& [key, value] : overrides) {
+    if (!text.empty()) text += ';';
+    text += key + "=" + value;
+  }
+  return text;
+}
+
+rex::cvar::Source SourceOf(std::string_view name) {
+  for (const auto& entry : rex::cvar::GetRegistry()) {
+    if (entry.name == name) return entry.source;
+  }
+  return rex::cvar::Source::kDefault;
+}
+
+class Profiles {
+ public:
+  explicit Profiles(b3::DekoOptions& options) : options_(options) {}
+
+  static bool IsDocked() { return appletGetOperationMode() == AppletOperationMode_Console; }
+  bool Docked() const { return docked_; }
+  int Active() const { return active_; }
+
+  // Called before the renderer reads the cvars: migrates old configs, applies the active profile and the dock overlay.
+  void Startup() {
+    if (SourceOf("b3_tempo_jogo_fps") == rex::cvar::Source::kDefault) {
+      const int speed = REXCVAR_GET(b3_velocidade_jogo);
+      const int limit = REXCVAR_GET(b3_limite_fps_luta);
+      const int tempo = speed == 0 ? 60 : (limit == 55 || limit == 50 || limit == 45 || limit == 40 || limit == 35 || limit == 30) ? limit : 45;
+      REXCVAR_SET(b3_tempo_jogo_fps, tempo);
+    }
+    int active = Find(rex::cvar::GetFlagByName("b3_perfil"));
+    if (active < 0) {
+      // Config from before the profiles: keep what it explicitly set as overrides of DEFAULT.
+      Overrides overrides;
+      for (int k = 0; k < kKeyCount; ++k) {
+        const std::string value = Current(k);
+        const bool set = k == kTempo || SourceOf(kKeys[k].cvar) == rex::cvar::Source::kConfig;
+        if (set && value != kProfiles[0].factory[k]) overrides.emplace_back(kKeys[k].id, value);
+      }
+      rex::cvar::SetFlagByName(kProfiles[0].cvar, JoinOverrides(overrides));
+      active = 0;
+      REXLOG_INFO("[B3 perfil] config antiga: perfil DEFAULT com {} ajustes", overrides.size());
+    }
+    Select(active);
+    docked_ = IsDocked();
+    if (docked_) ApplyDock();
+    REXLOG_INFO("[B3 perfil] ativo={} dock={}", kProfiles[active_].id, docked_ ? "sim" : "nao");
+  }
+
+  // Dock detection, polled from the pad filter (every ~250 ms).
+  void Poll() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_poll_ < std::chrono::milliseconds(250)) return;
+    last_poll_ = now;
+    const bool docked = IsDocked();
+    if (docked == docked_) return;
+    docked_ = docked;
+    ApplyDock();
+    REXLOG_INFO("[B3 perfil] dock={}", docked_ ? "sim" : "nao");
+  }
+
+  void Select(int index) {
+    active_ = index;
+    rex::cvar::SetFlagByName("b3_perfil", kProfiles[index].id);
+    for (int k = 0; k < kKeyCount; ++k) Set(k, Effective(index, k));
+    if (docked_) ApplyDock();
+  }
+
+  std::string Current(int key) const { return rex::cvar::GetFlagByName(kKeys[key].cvar); }
+
+  // Live change of one profile value (cvar + renderer options).
+  void Set(int key, const std::string& value) {
+    if (key == kTempo) {
+      const int fps = std::atoi(value.c_str());
+      REXCVAR_SET(b3_tempo_jogo_fps, fps);
+      REXCVAR_SET(b3_velocidade_jogo, fps == 60 ? 0 : 1);
+      REXCVAR_SET(b3_limite_fps_luta, fps);
+    } else if (key == kInterna) {
+      b3::PedirResolucaoInterna(std::atoi(value.c_str()));
+    } else {
+      rex::cvar::SetFlagByName(kKeys[key].cvar, value);
+    }
+    Sync();
+  }
+
+  // Mirrors the bool cvars into the renderer's option bits.
+  void Sync() {
+    auto on = [](const char* name) { return rex::cvar::GetFlagByName(name) == "true"; };
+    const uint32_t options = (on("b3_deko_reduzir_copias") ? uint32_t(b3::kReduzirCopias) : 0u) |
+                             (on("b3_deko_desfoque_leve") ? uint32_t(b3::kDesfoqueLeve) : 0u) |
+                             (on("b3_deko_bloom") ? uint32_t(b3::kBloom) : 0u) |
+                             (on("b3_deko_restaurar_z") ? uint32_t(b3::kRestaurarZ) : 0u) |
+                             (on("b3_deko_sombras_projetadas") ? uint32_t(b3::kSombrasProjetadas) : 0u) |
+                             b3::DofResolutionOption(std::atoi(Current(kDof).c_str()));
+    options_.store(options, std::memory_order_relaxed);
+  }
+
+  // Stores what differs from the factory values into the active profile, then writes the config file.
+  void SaveActive(const std::filesystem::path& config_path) {
+    const auto previous = ParseOverrides(rex::cvar::GetFlagByName(kProfiles[active_].cvar));
+    Overrides overrides;
+    for (int k = 0; k < kKeyCount; ++k) {
+      std::string value = Current(k);
+      if (docked_ && (k == kInterna || k == kSaida)) {
+        // The dock overlay owns these two while docked: keep the handheld value already stored.
+        const auto old = std::ranges::find(previous, std::string_view(kKeys[k].id), &Overrides::value_type::first);
+        if (old == previous.end()) continue;
+        value = old->second;
+      }
+      if (value != kProfiles[active_].factory[k]) overrides.emplace_back(kKeys[k].id, value);
+    }
+    rex::cvar::SetFlagByName(kProfiles[active_].cvar, JoinOverrides(overrides));
+    rex::cvar::SetFlagByName("b3_perfil", kProfiles[active_].id);
+    rex::cvar::SaveConfig(config_path);
+  }
+
+  void RestoreDefaults(const std::filesystem::path& config_path) {
+    for (const auto& profile : kProfiles) rex::cvar::SetFlagByName(profile.cvar, "");
+    Select(0);
+    rex::cvar::SaveConfig(config_path);
+  }
+
+ private:
+  static int Find(std::string_view id) {
+    for (int i = 0; i < kProfileCount; ++i) {
+      if (id == kProfiles[i].id) return i;
+    }
+    return -1;
+  }
+
+  std::string Effective(int profile, int key) const {
+    for (const auto& [id, value] : ParseOverrides(rex::cvar::GetFlagByName(kProfiles[profile].cvar))) {
+      if (id == kKeys[key].id) return value;
+    }
+    return kProfiles[profile].factory[key];
+  }
+
+  void ApplyDock() {
+    if (docked_) {
+      Set(kInterna, "720");
+      Set(kSaida, "1080");
+    } else {
+      Set(kInterna, Effective(active_, kInterna));
+      Set(kSaida, Effective(active_, kSaida));
+    }
+  }
+
+  b3::DekoOptions& options_;
+  int active_ = 0;
+  bool docked_ = false;
+  std::chrono::steady_clock::time_point last_poll_{};
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Quick menu
+// ---------------------------------------------------------------------------------------------------------------------
 class PortMenu {
  public:
-  PortMenu(b3::DekoOptions& options, const std::filesystem::path& config_path)
-      : options_(options), config_path_(config_path) {}
+  PortMenu(Profiles& profiles, std::filesystem::path config_path)
+      : profiles_(profiles), config_path_(std::move(config_path)) {}
 
   void Open() {
     music_independent_ = REXCVAR_GET(b3_deko_musica_independente);
+    confirm_ = false;
     Show();
   }
 
   bool Press(uint64_t buttons) {
-    if (buttons & HidNpadButton_Up) row_ = (row_ + kRows - 1) % kRows;
-    if (buttons & HidNpadButton_Down) row_ = (row_ + 1) % kRows;
+    const bool confirmed = confirm_ && row_ == kRestore && buttons == HidNpadButton_A;
+    confirm_ = false;
+    if (buttons & HidNpadButton_Up) row_ = NextIndex(row_, kRows, -1);
+    if (buttons & HidNpadButton_Down) row_ = NextIndex(row_, kRows, 1);
     if (buttons & (HidNpadButton_A | HidNpadButton_Left | HidNpadButton_Right)) {
       if (row_ == kSave) {
         if (buttons & HidNpadButton_A) {
           Save();
           return false;
+        }
+      } else if (row_ == kRestore) {
+        if (buttons & HidNpadButton_A) {
+          if (confirmed) {
+            profiles_.RestoreDefaults(config_path_);
+            music_independent_ = REXCVAR_GET(b3_deko_musica_independente);
+          } else {
+            confirm_ = true;
+          }
         }
       } else {
         Change(buttons & HidNpadButton_Left ? -1 : 1);
@@ -121,172 +351,377 @@ class PortMenu {
   }
 
  private:
-  static constexpr int kResolution = 1 + std::size(kSettings);
-  static constexpr int kFps = kResolution + 1;
-  static constexpr int kMusic = kFps + 1;
-  static constexpr int kAudioDelay = kMusic + 1;
-  static constexpr int kSave = kAudioDelay + 1;
-  static constexpr int kRows = kSave + 1;
-  static constexpr uint32_t kIndependentOptions = b3::kDofResolutionMask;
+  enum Row {
+    kProfile, kTime, kInternal, kOutput, kUpscaler, kShadows, kBloomRow, kBlur, kBattleBlur, kFps, kMusic, kDelay,
+    kSave, kRestore, kRows
+  };
+  static constexpr int kVisible = 13;
+  static constexpr std::array<int, 7> kTimes{60, 55, 50, 45, 40, 35, 30};
+  static constexpr std::array<int, 4> kInternals{720, 540, 360, 0};
+  static constexpr std::array<int, 3> kDofs{720, 540, 360};
+  static constexpr std::array<int, 4> kDockOutputs{1080, 900, 720, 540};
+  static constexpr std::array<int, 3> kHandheldOutputs{720, 540, 360};
+  static constexpr const char* kUpscalers[] = {"LINEAR", "CAS", "FSR1"};
+
+  std::span<const int> Outputs() const {
+    return profiles_.Docked() ? std::span<const int>(kDockOutputs) : std::span<const int>(kHandheldOutputs);
+  }
+
+  int OutputHeight() const {
+    const auto list = Outputs();
+    const int value = std::atoi(rex::cvar::GetFlagByName("b3_deko_resolucao_saida").c_str());
+    return std::ranges::find(list, value) == list.end() ? list.front() : value;
+  }
+
+  static std::string Resolution(int height) { return fmt::format("{}X{}", height * 16 / 9, height); }
+
+  bool Flag(int key) const { return profiles_.Current(key) == "true"; }
+  int Number(int key) const { return std::atoi(profiles_.Current(key).c_str()); }
+
+  std::string Line(int row) const {
+    switch (row) {
+      case kProfile: return std::string("PROFILE: ") + kProfiles[profiles_.Active()].name + (profiles_.Docked() ? " + DOCK" : "");
+      case kTime: {
+        const int fps = Number(kTempo);
+        return fps == 60 ? "GAME TIME: 60 FPS (ORIGINAL)" : fmt::format("GAME TIME: {} FPS", fps);
+      }
+      case kInternal: {
+        const int height = Number(kInterna);
+        return "INTERNAL RESOLUTION: " + (height == 0 ? std::string("AUTO") : Resolution(height));
+      }
+      case kOutput: return "OUTPUT RESOLUTION: " + Resolution(OutputHeight());
+      case kUpscaler: {
+        const int mode = std::clamp(REXCVAR_GET(b3_deko_ampliador), 0, 2);
+        return std::string("UPSCALER: ") + kUpscalers[mode];
+      }
+      case kShadows: return std::string("FIGHTER SHADOWS: ") + (Flag(kSombras) ? "YES" : "NO");
+      case kBloomRow: return std::string("BLOOM: ") + (Flag(kBloom) ? "YES" : "NO");
+      case kBlur: return std::string("LIGHTWEIGHT BLUR: ") + (Flag(kDesfoque) ? "YES" : "NO");
+      case kBattleBlur: return fmt::format("BATTLE BLUR: {}P", Number(kDof));
+      case kFps: return std::string("FPS COUNTER: ") + (REXCVAR_GET(switch_contador_fps) ? "YES" : "NO");
+      case kMusic: return std::string("MUSIC: ") + (music_independent_ ? "NORMAL SPEED" : "MATCH GAME TIME") + " (R)";
+      case kDelay: return "AUDIO DELAY: " + std::to_string(REXCVAR_GET(b3_audio_atraso_ms)) + " MS";
+      case kSave: return "SAVE AND CLOSE";
+      default: return confirm_ ? "PRESS A AGAIN TO CONFIRM" : "RESTORE DEFAULTS";
+    }
+  }
+
+  std::string Help() const {
+    switch (row_) {
+      case kProfile: {
+        std::string text = profiles_.Docked() ? "DOCK ON: INTERNAL 720P AND OUTPUT 1080P ARE SET AUTOMATICALLY. " : "";
+        text += kProfiles[profiles_.Active()].help;
+        if (!profiles_.Docked()) text += ". DOCK MODE ADDS 720P INTERNAL AND 1080P OUTPUT BY ITSELF";
+        return text;
+      }
+      case kTime:
+        return "BATTLES AND THE DRAGON UNIVERSE MAP RUN AT REAL SPEED CAPPED AT THIS FPS. CHOOSE 30, 35, 40, 45, 50, 55 OR 60. 40 FEELS SMOOTH, 30 SAVES THE MOST POWER, 60 KEEPS THE "
+               "ORIGINAL TIMING.";
+      case kInternal:
+        return "SIZE THE GAME DRAWS AT. LOWER IS FASTER BUT SOFTER. AUTO PICKS 720P OR 540P BY GPU LOAD. NEVER ABOVE "
+               "THE OUTPUT SIZE.";
+      case kOutput:
+        return "SIZE OF THE IMAGE SENT TO THE SCREEN, SEPARATE FROM INTERNAL. IF IT IS BIGGER THAN INTERNAL THE "
+               "UPSCALER STRETCHES IT. DOCKED 1080P LOOKS BEST. HANDHELD 720P IS NATIVE.";
+      case kUpscaler:
+        return "USED WHEN INTERNAL IS LOWER THAN OUTPUT. LINEAR IS SOFT AND CHEAP, CAS SHARPENS (SEE SHARPNESS IN "
+               "ADVANCED), FSR1 RESTORES THE MOST DETAIL BUT COSTS MORE GPU.";
+      case kShadows:
+        return "SHADOWS CAST BY THE FIGHTERS ON THE GROUND. TURN OFF TO SAVE GPU TIME IF BATTLES DROP FRAMES.";
+      case kBloomRow:
+        return "SOFT GLOW AROUND BRIGHT LIGHTS AND ENERGY. TURN OFF FOR A LITTLE MORE SPEED, THE IMAGE LOOKS FLATTER.";
+      case kBlur:
+        return "DEPTH BLUR USES 5 SAMPLES INSTEAD OF MORE. FASTER AND SLIGHTLY GRAINIER. RECOMMENDED WITH LOW POWER "
+               "OR HOT CONSOLES.";
+      case kBattleBlur:
+        return "SIZE OF THE BLUR BUFFER IN BATTLES. 540P OR 360P SAVE GPU TIME WITH LITTLE VISIBLE CHANGE.";
+      case kFps:
+        return "SHOWS THE FPS AND THE WORST FRAME GAP AT THE TOP LEFT. HANDY TO TEST SETTINGS, TURN OFF TO PLAY.";
+      case kMusic:
+        return music_independent_
+                   ? "MUSIC KEEPS ITS OWN TEMPO. RECOMMENDED WITH GAME TIME AT 60 FPS. OTHER SOUNDS MAY DRIFT OUT OF "
+                     "SYNC."
+                   : "MUSIC FOLLOWS GAME TIME. USE IT IF AUDIO DRIFTS. AT 60 FPS MUSIC MAY SLOW DOWN WITH THE GAME. "
+                     "BEST AT 45 FPS OR LESS.";
+      case kDelay:
+        return "DELAYS THE SOUND EFFECTS MIX IN STEPS OF 5 MS. RAISE IT IF SOUND ARRIVES BEFORE THE PICTURE. 0 IS "
+               "THE DEFAULT.";
+      case kSave:
+        return "STORES THESE OPTIONS IN THE ACTIVE PROFILE AND IN THE CONFIG FILE, THEN CLOSES. MUSIC NEEDS A "
+               "RESTART.";
+      default:
+        return confirm_ ? "PRESS A AGAIN TO CONFIRM. ANY OTHER KEY CANCELS."
+                        : "RESETS ALL PROFILES TO FACTORY VALUES AND SELECTS DEFAULT. NEEDS A SECOND PRESS OF A.";
+    }
+  }
 
   void Show() const {
-    const uint32_t options = options_.load(std::memory_order_relaxed);
-    std::vector<std::string> rows{"BUDOKAI 3 / MENU DO PORT"};
-    const int preset = CurrentPreset(options);
-    rows.push_back(std::string("PERFIL: ") + (preset >= 0 ? kPresets[preset].name : "PERSONALIZADO"));
-    for (const auto& setting : kSettings) {
-      rows.push_back(std::string(setting.label) + ": " + ((options & setting.option) ? "SIM" : "NAO"));
+    const int start = WindowStart(row_, kRows, kVisible);
+    std::vector<std::string> rows;
+    rows.push_back(fmt::format("BUDOKAI 3 / PORT MENU  {}/{}", row_ + 1, int(kRows)));
+    for (int i = start; i < std::min(start + kVisible, int(kRows)); ++i) {
+      rows.push_back(MenuText((i == row_ ? "> " : "  ") + Line(i), 44));
     }
-    rows.push_back("DESFOQUE DA LUTA: " + std::to_string(b3::DofResolutionHeight(options)) + "P");
-    rows.push_back(std::string("CONTADOR DE FPS: ") + (REXCVAR_GET(switch_contador_fps) ? "SIM" : "NAO"));
-    rows.emplace_back(music_independent_ ? "MUSICA: RITMO NORMAL" : "MUSICA: JUNTO COM A LUTA");
-    rows.push_back("ATRASO DO AUDIO: " + std::to_string(REXCVAR_GET(b3_audio_atraso_ms)) + " MS");
-    rows.emplace_back("SALVAR E FECHAR");
-    for (int i = 0; i < kRows; ++i) rows[i + 1].insert(0, i == row_ ? "> " : "  ");
-    rows.emplace_back("SETAS: AJUSTAR / A: ALTERAR / B: FECHAR");
-    if (row_ == kMusic) rows.emplace_back("MUSICA: SALVE E REABRA O JOGO");
+    rows.emplace_back("ARROWS: ADJUST / A: CHANGE / B: CLOSE");
     rex::ui::FijarSuperposicion(std::move(rows));
+    rex::ui::FijarLetreiro(Help());
   }
 
-  static int CurrentPreset(uint32_t options) {
-    for (int i = 0; i < int(std::size(kPresets)); ++i) {
-      if ((options & ~kIndependentOptions) == kPresets[i].options) return i;
-    }
-    return -1;
-  }
-
-  template <size_t N>
-  static int Cycle(const std::array<int, N>& values, int value, int direction) {
+  template <typename Range>
+  static int Cycle(const Range& values, int value, int direction) {
     const auto current = std::ranges::find(values, value);
-    if (current == values.end()) return values.front();
-    const int count = int(N);
-    return values[(int(current - values.begin()) + count + direction) % count];
+    if (current == std::ranges::end(values)) return *std::ranges::begin(values);
+    const int count = int(std::ranges::size(values));
+    return values[(int(current - std::ranges::begin(values)) + count + direction) % count];
   }
 
   void Change(int direction) {
-    uint32_t options = options_.load(std::memory_order_relaxed);
-    if (row_ == 0) {
-      const int current = CurrentPreset(options);
-      const int count = int(std::size(kPresets));
-      const int next = current < 0 ? 1 : (current + count + direction) % count;
-      options = kPresets[next].options | (options & kIndependentOptions);
-    } else if (row_ < kResolution) {
-      options ^= kSettings[row_ - 1].option;
-    } else if (row_ == kResolution) {
-      const int height = Cycle(std::array{720, 540, 360}, b3::DofResolutionHeight(options), direction);
-      options = (options & ~b3::kDofResolutionMask) | b3::DofResolutionOption(height);
-    } else if (row_ == kFps) {
-      REXCVAR_SET(switch_contador_fps, !REXCVAR_GET(switch_contador_fps));
-    } else if (row_ == kMusic) {
-      music_independent_ = !music_independent_;
-    } else if (row_ == kAudioDelay) {
-      const int delay = std::clamp(REXCVAR_GET(b3_audio_atraso_ms) + direction * kDelayStepMs,
-                                   0, rex::audio::nx::kMaxOutputDelayMs);
-      REXCVAR_SET(b3_audio_atraso_ms, delay);
-      rex::audio::nx::SetOutputDelayMs(delay);
-      REXLOG_INFO("[B3 audio] atraso={} ms", delay);
+    auto toggle = [&](int key) { profiles_.Set(key, Flag(key) ? "false" : "true"); };
+    switch (row_) {
+      case kProfile: profiles_.Select(NextIndex(profiles_.Active(), kProfileCount, direction)); break;
+      case kTime: profiles_.Set(kTempo, std::to_string(Cycle(kTimes, Number(kTempo), direction))); break;
+      case kInternal: profiles_.Set(kInterna, std::to_string(Cycle(kInternals, Number(kInterna), direction))); break;
+      case kOutput: profiles_.Set(kSaida, std::to_string(Cycle(Outputs(), OutputHeight(), direction))); break;
+      case kUpscaler:
+        rex::cvar::SetFlagByName("b3_deko_ampliador",
+                                 std::to_string(NextIndex(std::clamp(REXCVAR_GET(b3_deko_ampliador), 0, 2), 3, direction)));
+        break;
+      case kShadows: toggle(kSombras); break;
+      case kBloomRow: toggle(kBloom); break;
+      case kBlur: toggle(kDesfoque); break;
+      case kBattleBlur: profiles_.Set(kDof, std::to_string(Cycle(kDofs, Number(kDof), direction))); break;
+      case kFps: REXCVAR_SET(switch_contador_fps, !REXCVAR_GET(switch_contador_fps)); break;
+      case kMusic: music_independent_ = !music_independent_; break;
+      case kDelay: {
+        const int delay = std::clamp(REXCVAR_GET(b3_audio_atraso_ms) + direction * kDelayStepMs,
+                                     0, rex::audio::nx::kMaxOutputDelayMs);
+        REXCVAR_SET(b3_audio_atraso_ms, delay);
+        rex::audio::nx::SetOutputDelayMs(delay);
+        REXLOG_INFO("[B3 audio] atraso={} ms", delay);
+        break;
+      }
+      default: break;
     }
-    options_.store(options, std::memory_order_relaxed);
   }
 
-  void Save() const {
-    const uint32_t options = options_.load(std::memory_order_relaxed);
-    for (const auto& setting : kSettings) {
-      rex::cvar::SetFlagByName(setting.cvar, (options & setting.option) ? "true" : "false");
-    }
-    rex::cvar::SetFlagByName("b3_deko_desfoque_resolucao", std::to_string(b3::DofResolutionHeight(options)));
-    rex::cvar::SetFlagByName("switch_contador_fps", REXCVAR_GET(switch_contador_fps) ? "true" : "false");
+  void Save() {
     REXCVAR_SET(b3_deko_musica_independente, music_independent_);
-    rex::cvar::SaveConfig(config_path_);
+    profiles_.SaveActive(config_path_);
   }
 
-  b3::DekoOptions& options_;
+  Profiles& profiles_;
   std::filesystem::path config_path_;
   int row_ = 0;
+  bool confirm_ = false;
   bool music_independent_ = true;
 };
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Advanced menu: categories (level 1) and their options (level 2)
+// ---------------------------------------------------------------------------------------------------------------------
 struct SettingChoice {
   std::string_view value;
   std::string_view label;
 };
 
-constexpr SettingChoice kBoolean[] = {{"false", "NAO"}, {"true", "SIM"}};
-constexpr SettingChoice kAnisotropy[] = {{"0", "PADRAO"}, {"2", "2X"}, {"4", "4X"}, {"8", "8X"}};
+constexpr SettingChoice kBoolean[] = {{"false", "NO"}, {"true", "YES"}};
+constexpr SettingChoice kAnisotropy[] = {{"0", "DEFAULT"}, {"2", "2X"}, {"4", "4X"}, {"8", "8X"}};
 constexpr SettingChoice kGeometrySize[] = {{"0", "OFF"}, {"32", "32 MB"}, {"64", "64 MB"}, {"96", "96 MB"}};
 constexpr SettingChoice kTextureSize[] = {{"384", "384 MB"}, {"512", "512 MB"}, {"640", "640 MB"}};
-constexpr SettingChoice kAudioQueue[] = {{"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}, {"16", "16"}};
-constexpr SettingChoice kLogLevel[] = {{"info", "INFO"}, {"warn", "AVISOS"}, {"error", "ERROS"}};
+constexpr SettingChoice kPartialSubmit[] = {{"0", "OFF"}, {"128", "128"}, {"256", "256"}, {"512", "512"}};
+constexpr SettingChoice kUploadSize[] = {{"16", "16 MB"}, {"32", "32 MB"}, {"64", "64 MB"}};
+constexpr SettingChoice kAudioQueue[] = {{"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}, {"14", "14"}, {"16", "16"}};
+constexpr SettingChoice kAudioFrames[] = {{"4", "4"}, {"8", "8"}, {"16", "16"}, {"32", "32"}};
+constexpr SettingChoice kXmaThread[] = {{"0", "REQUESTING THREAD"}, {"1", "XMA THREAD"}, {"2", "WORKER"}};
+constexpr SettingChoice kLogLevel[] = {{"info", "INFO"}, {"warn", "WARNINGS"}, {"error", "ERRORS"}};
+constexpr SettingChoice kSharpness[] = {{"0", "0"}, {"25", "25"}, {"50", "50"}, {"75", "75"}, {"100", "100"}};
+constexpr SettingChoice kShadowBias[] = {{"0", "0"},   {"16", "16"},   {"32", "32"},
+                                         {"64", "64"}, {"128", "128"}, {"256", "256"}};
+constexpr SettingChoice kRumble[] = {{"0.25", "25%"}, {"0.5", "50%"}, {"0.75", "75%"}, {"1", "100%"}};
 
 struct AdvancedOption {
   const char* label;
   const char* cvar;
-  const char* description;
+  const char* help;
   std::span<const SettingChoice> choices = kBoolean;
   bool restart = false;
 };
 
-constexpr AdvancedOption kDisplayOptions[] = {
-    {"VSYNC", "vsync", "SINCRONIZA A APRESENTACAO DOS QUADROS"},
-    {"PULAR FXAA FINAL", "b3_deko_copia_final", "EVITA O FILTRO FINAL QUANDO COMPATIVEL", kBoolean, true},
-    {"MIPMAPS", "nfsmw_nativo_mipmaps", "USA OS NIVEIS DE TEXTURA DO JOGO", kBoolean, true},
-    {"FILTRO ANISOTROPICO", "nfsmw_nativo_anisotropico", "NITIDEZ DE TEXTURAS VISTAS DE LADO", kAnisotropy, true},
-    {"ZCULL", "b3_deko_zcull", "DESCARTA PIXELS COBERTOS NA GPU", kBoolean, true},
+constexpr AdvancedOption kGraphicsOptions[] = {
+    {"SKIP FINAL FXAA", "b3_deko_copia_final",
+     "PRESENTS THE IMAGE BEFORE THE GAME'S FINAL FXAA WHEN POSSIBLE. SAVES GPU TIME, EDGES LOOK A BIT ROUGHER.",
+     kBoolean, true},
+    {"MIPMAPS", "nfsmw_nativo_mipmaps",
+     "USES THE GAME'S SMALLER TEXTURE LEVELS FOR DISTANT SURFACES. KEEP ON. OFF IS ONLY FOR TESTS.", kBoolean, true},
+    {"ANISOTROPIC FILTERING", "nfsmw_nativo_anisotropico",
+     "SHARPENS TEXTURES SEEN AT SHALLOW ANGLES, LIKE THE ARENA FLOOR. 4X IS A GOOD BALANCE, DEFAULT IS FASTEST.",
+     kAnisotropy, true},
+    {"UPSCALER SHARPNESS", "b3_deko_nitidez",
+     "STRENGTH OF CAS SHARPENING, 0 TO 100. ONLY WITH UPSCALER CAS AND INTERNAL BELOW OUTPUT. 50 IS BALANCED.",
+     kSharpness},
+    {"FETCH INVALID AS TEXTURE", "b3_deko_fetch_invalido",
+     "TREATS TEXTURE SLOTS MARKED INVALID AS TEXTURES. NEEDED FOR FIGHTER SHADOWS. LEAVE ON.", kBoolean},
+    {"SHADOW DEPTH BIAS", "b3_deko_sombra_sesgo",
+     "PULLS THE FIGHTERS' SHADOW TOWARDS THE CAMERA SO IT STOPS FLICKERING IN STRIPES ON THE GROUND. 0 = ORIGINAL BEHAVIOUR. LIVE.",
+     kShadowBias},
+    {"GAMMA RAMP", "nfsmw_nativo_rampa_gamma",
+     "APPLIES THE GAME'S GAMMA CURVE LIKE THE ORIGINAL CONSOLE. OFF MAKES MIDTONES AND SHADOWS DARKER.", kBoolean,
+     true},
+};
+constexpr AdvancedOption kPacingOptions[] = {
+    {"VSYNC", "vsync",
+     "SYNCS PRESENTATION WITH THE SCREEN. OFF CAN TEAR BUT MAY REDUCE LATENCY. KEEP ON FOR 30 AND 45 FPS."},
+    {"RELAXED VSYNC", "b3_deko_vsync_relaxado",
+     "WHEN A FRAME IS LATE AT A 30 FPS CAP IT SHOWS AT THE NEXT VBLANK INSTEAD OF WAITING. AVOIDS 33 TO 67 MS SPIKES."},
+    {"GAME TIME ON DRAGON UNIVERSE", "b3_tempo_jogo_mundo",
+     "APPLIES GAME TIME (REAL SPEED AND FPS CAP) ALSO ON THE DRAGON UNIVERSE MAP, WITH THE SAME VALUE AS BATTLES. TURN OFF IF THE MAP RUNS TOO FAST OR TOO SLOW."},
+};
+constexpr AdvancedOption kRenderOptions[] = {
+    {"REDUCE GPU COPIES", "b3_deko_reduzir_copias",
+     "SKIPS A REDUNDANT FINAL DRAW AND THE CPU READ OF THE 80X45 BLOOM. KEEP ON FOR SPEED."},
+    {"RESTORE DEPTH", "b3_deko_restaurar_z",
+     "RESTORES SCENE DEPTH AFTER A RESOLVE. NEEDED FOR CORRECT EFFECTS. LEAVE ON."},
+    {"RESTORE STENCIL", "b3_deko_restaurar_stencil",
+     "KEEPS THE STENCIL MASK WHEN THE DEPTH IS SAVED AND RESTORED. LEAVE ON."},
+    {"COLOR HANDOVER", "b3_deko_handover_cor",
+     "SWAPS IMAGES INSTEAD OF COPYING WHEN A WHOLE COLOR TARGET IS RESOLVED TO AN IDENTICAL TEXTURE. SAVES GPU TIME."},
+    {"SKIP REPEATED RESOLVES", "b3_deko_pular_resolve_repetido",
+     "SKIPS A RESOLVE IDENTICAL TO THE PREVIOUS ONE WHEN NOTHING CHANGED. SAVES GPU TIME."},
+    {"RESOLVE BY SWAP", "nfsmw_nativo_resolver_sin_copia",
+     "SWAPS IMAGES INSTEAD OF COPYING PIXELS WHEN RESOLVING A FULL TARGET TO A SAME SIZE TEXTURE. KEEP ON.", kBoolean,
+     true},
+    {"LAZY FRONT BUFFER", "nfsmw_nativo_frontal_perezoso",
+     "THE SWAP DRAWS THE FRONT BUFFER FROM THE RENDER TARGET INSTEAD OF COPYING IT FIRST. SAME IMAGE, A LITTLE FASTER.",
+     kBoolean},
+    {"COLOR COMPRESSION", "nfsmw_dk_compresion_color", "REDUCES RGBA8 TARGET BANDWIDTH. KEEP ON.", kBoolean, true},
+    {"DEPTH COMPRESSION", "nfsmw_dk_compresion_profundidad", "REDUCES DEPTH TARGET BANDWIDTH. KEEP ON.", kBoolean,
+     true},
+    {"CLEAR USED AREA", "nfsmw_dk_borrar_area_util", "CLEARS ONLY THE ROWS IN USE INSTEAD OF THE WHOLE TARGET."},
+    {"DEFER COLOR CLEARS", "nfsmw_dk_borrado_color_aplazado",
+     "WAITS UNTIL THE COLOR TARGET IS USED BEFORE CLEARING IT. SAVES WORK WHEN IT IS NEVER DRAWN."},
+    {"DEFER DEPTH CLEARS", "nfsmw_dk_borrado_z_aplazado",
+     "WAITS UNTIL THE DEPTH TARGET IS USED BEFORE CLEARING IT. SAVES WORK WHEN IT IS NEVER DRAWN."},
+    {"PARTIAL COMMAND SUBMISSION", "nfsmw_dk_envio_parcial",
+     "DRAW CALLS PER PARTIAL SUBMISSION TO THE GPU. SMALLER LETS THE GPU START EARLIER, 256 IS BALANCED.",
+     kPartialSubmit},
+    {"UPLOAD BUFFER", "nfsmw_dk_subida_mb",
+     "UPLOAD MEMORY PER COMMAND SLOT. 32 MB IS ENOUGH. USE 16 MB IF MEMORY IS SHORT.", kUploadSize, true},
 };
 constexpr AdvancedOption kGpuOptions[] = {
-    {"Z ANTECIPADO", "nfsmw_nativo_z_temprana", "TESTA PROFUNDIDADE ANTES DO SHADER"},
-    {"PULAR DESENHOS INVISIVEIS", "nfsmw_nativo_saltar_invisibles", "EVITA DESENHOS SEM EFEITO VISUAL"},
-    {"PULAR LIMPEZAS REPETIDAS", "nfsmw_nativo_saltar_borrados_repetidos", "EVITA REPETIR LIMPEZAS DA MESMA AREA"},
-    {"RESTAURAR STENCIL", "b3_deko_restaurar_stencil", "PRESERVA A MASCARA DA CENA NAS COPIAS"},
-    {"CACHE DE TEXTURAS", "nfsmw_nativo_texturas_mb_max", "LIMITE ANTES DE LIBERAR TEXTURAS ANTIGAS", kTextureSize},
-    {"CACHE DE GEOMETRIA", "nfsmw_dk_geometria_mb", "REUTILIZA VERTICES E INDICES", kGeometrySize, true},
-    {"AMOSTRAR GEOMETRIA", "nfsmw_dk_geometria_muestreo", "CONFERE PARTES DA GEOMETRIA EM CACHE", kBoolean, true},
+    {"OFFICIAL GPU BOOST", "b3_gpu_boost",
+     "HANDHELD ONLY. ASKS THE SYSTEM FOR ITS OFFICIAL 460 MHZ GPU MODE. DEFAULT AND PERFORMANCE USE IT IN HANDHELD, NO OVERCLOCK DOES NOT. DOES NOTHING DOCKED."},
+    {"ZCULL", "b3_deko_zcull",
+     "REJECTS HIDDEN PIXELS EARLY ON THE GPU. SAVES TIME IN MOST SCENES.", kBoolean, true},
+    {"EARLY Z", "nfsmw_nativo_z_temprana", "TESTS DEPTH BEFORE SHADING SO HIDDEN PIXELS COST LESS."},
+    {"SKIP INVISIBLE DRAWS", "nfsmw_nativo_saltar_invisibles", "SKIPS DRAWS THAT HAVE NO VISIBLE EFFECT."},
+    {"SKIP REPEATED CLEARS", "nfsmw_nativo_saltar_borrados_repetidos", "AVOIDS CLEARING THE SAME AREA TWICE."},
+    {"TEXTURE CACHE", "nfsmw_nativo_texturas_mb_max",
+     "TEXTURE MEMORY KEPT BEFORE OLD ONES ARE DROPPED. 512 MB IS BALANCED, LOWER IF MEMORY RUNS OUT.", kTextureSize},
+    {"GEOMETRY CACHE", "nfsmw_dk_geometria_mb",
+     "REUSES VERTICES AND INDICES BETWEEN FRAMES. OFF SAVES MEMORY.", kGeometrySize, true},
+    {"SAMPLE GEOMETRY", "nfsmw_dk_geometria_muestreo",
+     "CHECKS ONLY PARTS OF CACHED GEOMETRY TO DETECT CHANGES. FASTER.", kBoolean, true},
+    {"BACKGROUND SHADER COMPILE", "nfsmw_dk_compilar_en_fondo",
+     "COMPILES NEW SHADER VARIANTS IN THE BACKGROUND TO AVOID HITCHES. OFF COMPILES ON THE SPOT.", kBoolean, true},
 };
-constexpr AdvancedOption kSystemOptions[] = {
-    {"SILENCIAR AUDIO", "audio_mute", "DESLIGA A SAIDA DE SOM"},
-    {"BOMBA DE AUDIO", "audio_switch_bomba", "SOLICITA AUDIO EM INTERVALOS REGULARES", kBoolean, true},
-    {"FILA DE AUDIO", "audio_switch_tramas_en_cola", "QUADROS PCM NA FILA DA BOMBA", kAudioQueue, true},
-    {"BOTOES POR POSICAO", "input_xbox_layout", "USA A POSICAO FISICA DOS BOTOES XBOX"},
-    {"NIVEL DO LOG", "log_level", "ESCOLHE O DETALHE DOS REGISTROS", kLogLevel},
-    {"CAPTURA L3 + R3", "b3_deko_diagnostico", "GRAVA UM QUADRO E SEUS DADOS", kBoolean, true},
-    {"CAPTURA COMPLETA", "b3_deko_diagnostico_completo", "GRAVA MAIS DADOS NA CAPTURA DE QUADRO"},
+constexpr AdvancedOption kAudioOptions[] = {
+    {"MUTE AUDIO", "audio_mute", "TURNS ALL SOUND OFF."},
+    {"AUDIO PUMP", "audio_switch_bomba",
+     "ASKS THE GAME FOR AUDIO AT REGULAR INTERVALS. KEEP ON TO AVOID ROBOTIC SOUND.", kBoolean, true},
+    {"AUDIO QUEUE", "audio_switch_tramas_en_cola",
+     "PCM BLOCKS QUEUED BY THE PUMP. MORE AVOIDS CUTS BUT ADDS DELAY. 10 IS BALANCED.", kAudioQueue, true},
+    {"AUDIO FRAME LIMIT", "audio_maxqframes",
+     "MAX BUFFERED AUDIO FRAMES. LOWER REDUCES DELAY BUT MAY CRACKLE.", kAudioFrames, true},
+    {"XMA DECODE THREAD", "audio_xma_en_trabajador",
+     "WHO DECODES XMA MUSIC AND VOICES. CHANGE IT ONLY IF AUDIO STUTTERS DURING BATTLES.", kXmaThread, true},
+};
+constexpr AdvancedOption kControlOptions[] = {
+    {"BUTTONS BY POSITION", "input_xbox_layout",
+     "MATCHES THE PHYSICAL XBOX BUTTON POSITIONS INSTEAD OF THE LETTERS. TURN ON IF BUTTONS FEEL SWAPPED."},
+    {"RUMBLE", "input_vibracion", "ENABLES THE GAME'S RUMBLE. OFF SENDS NO VIBRATION."},
+    {"RUMBLE STRENGTH", "input_vibracion_fuerza", "SCALES THE GAME'S RUMBLE. THE SWITCH MOTORS FEEL STRONGER.",
+     kRumble},
+};
+constexpr AdvancedOption kLogOptions[] = {
+    {"LOG LEVEL", "log_level", "HOW MUCH THE LOG FILE RECORDS. INFO IS BEST FOR BUG REPORTS.", kLogLevel},
+    {"LOG TO FILE", "log_to_file", "WRITES THE LOG TO A FILE ON THE SD CARD. USEFUL FOR BUG REPORTS.", kBoolean, true},
+    {"L3 + R3 CAPTURE", "b3_deko_diagnostico",
+     "PRESS BOTH STICKS TO CAPTURE A FRAME AND ITS DATA FOR DIAGNOSIS.", kBoolean, true},
+    {"FULL CAPTURE", "b3_deko_diagnostico_completo", "ADDS MORE DATA TO FRAME CAPTURES. LARGER FILES."},
 };
 
-struct AdvancedPage {
+struct AdvancedCategory {
   const char* name;
+  const char* help;
   std::span<const AdvancedOption> options;
 };
 
-constexpr AdvancedPage kAdvancedPages[] = {
-    {"IMAGEM", kDisplayOptions}, {"GPU E CACHE", kGpuOptions}, {"SOM, CONTROLES E LOGS", kSystemOptions},
+constexpr AdvancedCategory kCategories[] = {
+    {"GRAPHICS", "IMAGE QUALITY: FINAL FILTER, TEXTURE FILTERING, UPSCALER SHARPNESS AND COLOR.", kGraphicsOptions},
+    {"FRAME PACING", "HOW FRAMES REACH THE SCREEN: VSYNC AND LATE FRAME HANDLING.", kPacingOptions},
+    {"DEKO RENDERING", "DEKO3D RENDERER INTERNALS: COPIES, RESOLVES, CLEARS AND COMMAND SUBMISSION.", kRenderOptions},
+    {"GPU AND CACHE", "GPU BOOST, DEPTH CULLING AND TEXTURE, GEOMETRY AND SHADER CACHES.", kGpuOptions},
+    {"AUDIO", "SOUND OUTPUT, BUFFERING AND DECODING.", kAudioOptions},
+    {"CONTROLS", "BUTTON LAYOUT AND RUMBLE.", kControlOptions},
+    {"LOGS AND DIAGNOSTICS", "LOG FILES AND FRAME CAPTURES FOR BUG REPORTS.", kLogOptions},
 };
+constexpr int kCategoryCount = int(std::size(kCategories));
 
 class AdvancedSettings {
  public:
-  explicit AdvancedSettings(std::filesystem::path config_path) : config_path_(std::move(config_path)) {}
+  AdvancedSettings(Profiles& profiles, std::filesystem::path config_path)
+      : profiles_(profiles), config_path_(std::move(config_path)) {}
 
-  void Open() const { Show(); }
+  void Open() {
+    level_ = 1;
+    saved_ = false;
+    Show();
+  }
+
+  // B: back from the options to the categories. Returns false when the menu should close.
+  bool Back() {
+    if (level_ == 1) return false;
+    level_ = 1;
+    row_ = category_;
+    saved_ = false;
+    Show();
+    return true;
+  }
 
   bool Press(uint64_t pressed) {
+    saved_ = false;
+    if (level_ == 1) {
+      if (pressed & HidNpadButton_Up) row_ = NextIndex(row_, kCategoryCount + 1, -1);
+      if (pressed & HidNpadButton_Down) row_ = NextIndex(row_, kCategoryCount + 1, 1);
+      if (pressed & HidNpadButton_A) {
+        if (row_ == kCategoryCount) {
+          Save();
+        } else {
+          category_ = row_;
+          level_ = 2;
+          row_ = 0;
+        }
+      }
+      Show();
+      return true;
+    }
     if (pressed & (HidNpadButton_L | HidNpadButton_R)) {
-      page_ = NextIndex(page_, std::size(kAdvancedPages), pressed & HidNpadButton_L ? -1 : 1);
+      category_ = NextIndex(category_, kCategoryCount, pressed & HidNpadButton_L ? -1 : 1);
       row_ = 0;
     }
-    const auto options = kAdvancedPages[page_].options;
+    const auto options = kCategories[category_].options;
     const int save = int(options.size());
     if (pressed & HidNpadButton_Up) row_ = NextIndex(row_, save + 1, -1);
     if (pressed & HidNpadButton_Down) row_ = NextIndex(row_, save + 1, 1);
     if (row_ == save) {
-      if (pressed & HidNpadButton_A) {
-        rex::cvar::SaveConfig(config_path_);
-        return false;
-      }
+      if (pressed & HidNpadButton_A) Save();
     } else if (pressed & (HidNpadButton_A | HidNpadButton_Left | HidNpadButton_Right)) {
       const auto& option = options[row_];
       const int current = ChoiceIndex(option, rex::cvar::GetFlagByName(option.cvar));
-      const int next = current < 0 ? 0 : NextIndex(current, option.choices.size(), pressed & HidNpadButton_Left ? -1 : 1);
+      const int next = current < 0 ? 0 : NextIndex(current, int(option.choices.size()), pressed & HidNpadButton_Left ? -1 : 1);
       const auto value = option.choices[next].value;
       if (rex::cvar::SetFlagByName(option.cvar, value)) {
+        profiles_.Sync();
         REXLOG_INFO("[B3 Deko menu] {}={}", option.cvar, value);
       }
     }
@@ -295,43 +730,83 @@ class AdvancedSettings {
   }
 
  private:
+  static bool SameValue(std::string_view a, std::string_view b) {
+    if (a == b) return true;
+    const std::string left(a), right(b);
+    char* end_left = nullptr;
+    char* end_right = nullptr;
+    const double x = std::strtod(left.c_str(), &end_left);
+    const double y = std::strtod(right.c_str(), &end_right);
+    return !left.empty() && !right.empty() && *end_left == '\0' && *end_right == '\0' && std::abs(x - y) < 1e-6;
+  }
+
   static int ChoiceIndex(const AdvancedOption& option, std::string_view value) {
-    const auto item = std::ranges::find(option.choices, value, &SettingChoice::value);
-    return item == option.choices.end() ? -1 : int(item - option.choices.begin());
+    for (size_t i = 0; i < option.choices.size(); ++i) {
+      if (SameValue(option.choices[i].value, value)) return int(i);
+    }
+    return -1;
+  }
+
+  void Save() {
+    profiles_.SaveActive(config_path_);
+    saved_ = true;
   }
 
   void Show() const {
-    const auto& page = kAdvancedPages[page_];
-    std::vector<std::string> lines{std::string("AJUSTES / ") + page.name};
-    for (size_t i = 0; i < page.options.size(); ++i) {
-      const auto& option = page.options[i];
-      const auto value = rex::cvar::GetFlagByName(option.cvar);
-      const int selected = ChoiceIndex(option, value);
-      std::string line = fmt::format("{}{}: {}", int(i) == row_ ? "> " : "  ", option.label,
-                                    selected < 0 ? std::string_view(value) : option.choices[selected].label);
-      if (option.restart) line += " (R)";
-      lines.push_back(MenuText(line, 44));
+    std::vector<std::string> lines;
+    std::string help;
+    if (level_ == 1) {
+      lines.emplace_back("SETTINGS / CATEGORIES");
+      for (int i = 0; i < kCategoryCount; ++i) {
+        lines.push_back(std::string(i == row_ ? "> " : "  ") + kCategories[i].name);
+      }
+      lines.push_back(std::string(row_ == kCategoryCount ? "> " : "  ") + "SAVE TO CONFIG");
+      lines.emplace_back("ARROWS: SELECT / A: OPEN / B: CLOSE");
+      help = row_ == kCategoryCount ? "WRITES THE CURRENT SETTINGS TO THE CONFIG FILE ON THE SD CARD."
+                                    : kCategories[row_].help;
+    } else {
+      const auto& category = kCategories[category_];
+      const int count = int(category.options.size()) + 1;
+      const int start = WindowStart(row_, count, 13);
+      lines.push_back(fmt::format("SETTINGS / {}  {}/{}", category.name, row_ + 1, count));
+      for (int i = start; i < std::min(start + 13, count); ++i) {
+        if (i == count - 1) {
+          lines.push_back(std::string(i == row_ ? "> " : "  ") + "SAVE TO CONFIG");
+          continue;
+        }
+        const auto& option = category.options[i];
+        const auto value = rex::cvar::GetFlagByName(option.cvar);
+        const int selected = ChoiceIndex(option, value);
+        std::string line = fmt::format("{}{}: {}", i == row_ ? "> " : "  ", option.label,
+                                      selected < 0 ? std::string_view(value) : option.choices[selected].label);
+        if (option.restart) line += " (R)";
+        lines.push_back(MenuText(line, 44));
+      }
+      lines.emplace_back("A: CHANGE / L/R: CATEGORY / B: BACK");
+      help = row_ == count - 1 ? "WRITES THE CURRENT SETTINGS TO THE CONFIG FILE ON THE SD CARD."
+                               : std::string(category.options[row_].help) +
+                                     (category.options[row_].restart ? " (R) NEEDS A RESTART TO APPLY." : "");
     }
-    const bool save_row = size_t(row_) == page.options.size();
-    lines.emplace_back(save_row ? "> SALVAR E FECHAR" : "  SALVAR E FECHAR");
-    lines.emplace_back(save_row ? "GRAVA OS AJUSTES NO CARTAO" : page.options[row_].description);
-    lines.emplace_back("L/R ABAS / SETAS E A AJUSTAM / B FECHA");
-    lines.emplace_back("(R) SALVE E REABRA PARA APLICAR");
+    if (saved_) help = "SAVED TO THE CONFIG FILE. (R) OPTIONS APPLY AFTER A RESTART.";
     rex::ui::FijarSuperposicion(std::move(lines));
+    rex::ui::FijarLetreiro(std::move(help));
   }
 
+  Profiles& profiles_;
   std::filesystem::path config_path_;
-  int page_ = 0;
+  int level_ = 1;
+  int category_ = 0;
   int row_ = 0;
+  bool saved_ = false;
 };
 
 class AchievementsMenu {
  public:
   void Show(rex::system::AchievementManager& manager, uint64_t pressed = 0) {
     const auto catalog = manager.ListAchievements();
-    std::vector<std::string> lines{"BUDOKAI 3 / CONQUISTAS"};
+    std::vector<std::string> lines{"BUDOKAI 3 / ACHIEVEMENTS"};
     if (catalog.empty()) {
-      lines.emplace_back("SEM CONQUISTAS CARREGADAS");
+      lines.emplace_back("NO ACHIEVEMENTS LOADED");
     } else {
       constexpr int kPageRows = 8;
       const int size = int(catalog.size());
@@ -344,7 +819,7 @@ class AchievementsMenu {
       const auto unlocked = std::ranges::count_if(catalog, [&](const auto& item) {
         return manager.IsUnlocked(item.id);
       });
-      lines.push_back(fmt::format("{} DE {} DESBLOQUEADAS", unlocked, size));
+      lines.push_back(fmt::format("{} OF {} UNLOCKED", unlocked, size));
       const int start = row_ / kPageRows * kPageRows;
       for (int i = start; i < std::min(start + kPageRows, size); ++i) {
         const auto& item = catalog[i];
@@ -361,7 +836,8 @@ class AchievementsMenu {
         description.remove_prefix(std::min(split + 1, description.size()));
       }
     }
-    lines.emplace_back("SETAS NAVEGAM / B FECHA");
+    lines.emplace_back("ARROWS: NAVIGATE / B: CLOSE");
+    rex::ui::FijarLetreiro({});
     rex::ui::FijarSuperposicion(std::move(lines));
   }
 
@@ -396,7 +872,7 @@ class DekoXenosApp final : public rex::ReXApp {
           std::lock_guard lock(menu_mutex_);
           if (menu_owner_ != this) return;
           const auto& item = event.achievement;
-          rex::ui::AvisarSuperposicion({fmt::format("CONQUISTA DESBLOQUEADA / {} G", item.gamerscore),
+          rex::ui::AvisarSuperposicion({fmt::format("ACHIEVEMENT UNLOCKED / {} G", item.gamerscore),
                                        MenuText(item.label, 44)});
           REXLOG_INFO("[B3 Deko menu] aviso de conquista {}", item.id);
         });
@@ -433,6 +909,11 @@ class DekoXenosApp final : public rex::ReXApp {
     rex::audio::nx::SetOutputDelayMs(delay);
     REXLOG_INFO("[B3 audio] modo={} atraso={} ms",
                 separate_music ? "musica_independente" : "mistura_0.1.32", delay);
+    profiles_.Startup();
+    if (profiles_.Active() == 2 && REXCVAR_GET(audio_switch_tramas_en_cola) == 10) {
+      REXCVAR_SET(audio_switch_tramas_en_cola, 14);
+      REXLOG_INFO("[B3 audio] perfil sem overclock: 14 tramas em cola (75 ms) contra estalos");
+    }
     config.graphics = b3::CreateXenosDeko(package_ / "b3_shaders.nfsp", options_);
     REXLOG_INFO("B3: standard ReXGlue Xenos command processor, Deko3D backend, package {}",
                 package_.string());
@@ -445,8 +926,8 @@ class DekoXenosApp final : public rex::ReXApp {
     {
       std::lock_guard lock(menu_mutex_);
       menu_owner_ = this;
-      port_menu_ = std::make_unique<PortMenu>(options_, config_path);
-      advanced_ = std::make_unique<AdvancedSettings>(config_path);
+      port_menu_ = std::make_unique<PortMenu>(profiles_, config_path);
+      advanced_ = std::make_unique<AdvancedSettings>(profiles_, config_path);
     }
     rex::input::FijarFiltroMando(&DekoXenosApp::FilterPad);
     rex::ui::RegisterBind(kProfilesBind, "F5", "Budokai 3 port menu", [this] {
@@ -478,6 +959,7 @@ class DekoXenosApp final : public rex::ReXApp {
     menu_ = Menu::kClosed;
     release_buttons_.fill(true);
     rex::ui::FijarSuperposicion({});
+    rex::ui::FijarLetreiro({});
     REXLOG_INFO("[B3 Deko menu] fechado");
   }
 
@@ -504,6 +986,7 @@ class DekoXenosApp final : public rex::ReXApp {
     std::lock_guard lock(menu_mutex_);
     if (!menu_owner_) return false;
     auto& app = *menu_owner_;
+    app.profiles_.Poll();
     if (slot >= app.previous_buttons_.size()) return app.menu_ != Menu::kClosed;
     const uint64_t previous = std::exchange(app.previous_buttons_[slot], buttons);
     if (app.release_buttons_[slot]) {
@@ -522,7 +1005,7 @@ class DekoXenosApp final : public rex::ReXApp {
                                   HidNpadButton_L | HidNpadButton_R;
     const uint64_t pressed = (buttons & ~previous) & controls;
     if (pressed & HidNpadButton_B) {
-      app.CloseMenu();
+      if (app.menu_ != Menu::kAdvanced || !app.advanced_->Back()) app.CloseMenu();
     } else if (pressed) {
       if (app.menu_ == Menu::kQuick && !app.port_menu_->Press(pressed)) app.CloseMenu();
       if (app.menu_ == Menu::kAdvanced && !app.advanced_->Press(pressed)) app.CloseMenu();
@@ -534,7 +1017,8 @@ class DekoXenosApp final : public rex::ReXApp {
   static inline std::mutex menu_mutex_;
   static inline DekoXenosApp* menu_owner_ = nullptr;
   std::filesystem::path package_;
-  b3::DekoOptions options_{kPresets[1].options};
+  b3::DekoOptions options_{0};
+  Profiles profiles_{options_};
   std::unique_ptr<PortMenu> port_menu_;
   std::unique_ptr<AdvancedSettings> advanced_;
   AchievementsMenu achievements_menu_;

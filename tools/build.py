@@ -45,6 +45,8 @@ def main():
     if not decoded_image.is_file():
         raise SystemExit("The ReXGlue build did not export the decoded XEX. Use the SDK build described in docs/build.md.")
 
+    run([sys.executable, ROOT / "tools/prepare_battle_delta.py"], env)
+
     shader_out = out / "shaders"
     run([sys.executable, ROOT / "tools/shaders.py", decoded_image, shader_out,
          "--xenosrecomp", args.xenosrecomp.resolve(), "--shader-common", ROOT / "tools/xenos/shader_common.h",

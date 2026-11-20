@@ -18,3 +18,26 @@ O segundo recorte seleciona janelas com mais trabalho de renderização pelo nú
 | 14:19:32 | 46,2 | 20,87 ms | 406 |
 
 Na janela de 30,8 FPS, o desenho da cena consumiu **19,91 ms** e as cópias consumiram **6,10 ms** de GPU por quadro. Nas cenas mais pesadas, vozes ou efeitos ainda podem adiantar em relação à animação com a trilha no modo **Ritmo normal**.
+
+## B3deko 0.1.44 e 0.1.46
+
+A partir da 0.1.42 o alvo é manter uma velocidade estável com os **clocks padrão do Switch**. Os números abaixo vêm de logs de luta da **0.1.44** no modo portátil, com **CPU a 1.020 MHz, GPU a 307 MHz e RAM a 1.331 MHz**, sem o modo oficial de GPU de 460 MHz, exceto onde indicado. A 0.1.46 ainda não foi medida: a versão não foi testada no console.
+
+| Teto (GAME TIME) | Condições | FPS | GPU por quadro |
+| --- | --- | ---: | ---: |
+| 30 FPS | clocks padrão | 30,0 | - |
+| 35 FPS | clocks padrão | 35,0 | - |
+| 40 FPS | clocks padrão | 40,0 (mediana; mínimo de janela 32,4) | 21,5 ms |
+| 45 FPS | perfil DEFAULT, interna 720, clocks padrão | 43,8 (mediana) | 13,5 ms (mediana) |
+
+Linha de base da **0.1.43**, com o modo oficial de GPU a **460 MHz**:
+
+| Teto (GAME TIME) | Condições | FPS | GPU por quadro |
+| --- | --- | ---: | ---: |
+| 40 FPS | interna 720 | 39,9 | 17,5 ms |
+| 45 FPS | interna 720 | 45,0 | 14,9 ms |
+| 45 FPS, mapa do Dragon Universe | - | - | 13 a 16 ms (0.1.41: 21 ms) |
+
+O tempo de GPU por quadro depende do clock da GPU, de modo que valores medidos a 307 MHz e a 460 MHz não se comparam diretamente. O tempo de jogo em tempo real (delta time) separa a velocidade da simulação da taxa de apresentação; veja [Referências](referencias.md).
+
+Em testes com o perfil NO OVERCLOCK (CPU 1.020 MHz, RAM 1.331 MHz) havia chiado no áudio, que sumia com RAM a 1.600 MHz. A 0.1.46 acrescenta uma rampa anti-estalo e um colchão de áudio maior nesse perfil. Isso ainda precisa de teste no console.

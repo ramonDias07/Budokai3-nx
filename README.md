@@ -2,7 +2,7 @@
 
 Port homebrew não oficial de **Dragon Ball Z: Budokai 3 HD** para Nintendo Switch, baseado na edição Xbox 360 de *Dragon Ball Z: Budokai HD Collection*. O ReXGlue recompila o código PowerPC do jogo para ARM64. O port processa os comandos gráficos Xenos e renderiza com Deko3D.
 
-[Release v0.1.40](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.40) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
+[Release v0.1.46](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.46) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
 
 Para começar, baixe **Source code** na release e siga o guia de compilação com seu próprio dump **USA/Japan de Xbox 360**. As ferramentas geram o `B3.nro` e montam a pasta para o SD.
 
@@ -10,7 +10,7 @@ Para começar, baixe **Source code** na release e siga o guia de compilação co
 
 | Área | Estado |
 | --- | --- |
-| Switch físico | A [release 0.1.40](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.40) foi testada no console com lutas, campanha, menus e avisos de conquista. |
+| Switch físico | A [release 0.1.46](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.46) parte da 0.1.40, testada no console com lutas, campanha, menus e avisos de conquista. As versões 0.1.42 a 0.1.44 também foram testadas; o shader da 0.1.45 e as correções da 0.1.46 ainda não. |
 | Ponto em aberto | Em cenas mais pesadas, alguns efeitos de áudio ainda podem adiantar com a trilha no modo Ritmo normal. |
 | Desempenho | **45,9 FPS** de média nas janelas com mais desenhos. A metade central ficou entre **42,2 e 49,4 FPS**. O Switch dos testes usou **RAM 1.600 MHz, CPU 1.400 MHz e GPU 460 MHz**. [Medições e método](docs/performance.md) |
 
@@ -69,9 +69,9 @@ Veja de onde veio cada parte e como outros ports tratam instalação e dados ori
 
 ## English overview
 
-**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.40** was tested on physical Switch hardware and features a Dragon Rush prompt adapted to the Switch ABXY layout.
+**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.46** builds on **0.1.40**, which was tested on physical Switch hardware, and features a Dragon Rush prompt adapted to the Switch ABXY layout.
 
-Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. The build tools generate the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.40) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
+Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. The build tools generate the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.46) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
 ## Licenças e dados do jogo
 
