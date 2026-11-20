@@ -59,6 +59,16 @@ Se o projeto foi útil, deixe uma estrela no GitHub para acompanhar o repositór
 
 ## Créditos e referências
 
+### Jogo original
+
+- **Dragon Ball Z: Budokai 3** foi desenvolvido pela **Dimps** e publicado pela **Bandai** no Japão e pela **Atari** na América do Norte e na Europa (PlayStation 2, 2004).
+- **Dragon Ball Z: Budokai HD Collection** (Xbox 360 e PlayStation 3, 2012), a edição usada como base deste port, foi publicada pela **Namco Bandai Games**, hoje **Bandai Namco Entertainment**.
+- **Dragon Ball** foi criado por **Akira Toriyama**. O mangá é publicado pela **Shueisha** e a série animada é produzida pela **Toei Animation**. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION.
+
+O jogo, os personagens, a arte, a música, as vozes e o design pertencem a essas empresas e às equipes que os criaram. Se você gosta deste port, apoie as versões oficiais.
+
+### Port e ferramentas
+
 - **NovaPowers** pelo port original para PC e pela base de recompilação. [DBZ-Budokai-3-HD-Collection](https://github.com/novapowers0/DBZ-Budokai-3-HD-Collection)
 - **Tom Clay, colaboradores do Xenia e nx-mod** pelo recompilador, runtime e suporte ao Switch. [ReXGlue](https://github.com/rexglue/rexglue-sdk) · [ReXGlue SDK NX](https://github.com/nx-mod/rexglue-sdk-nx)
 - **StevensND** pelo trabalho no renderizador Deko/NFSMW e pelas rotinas reutilizadas de shaders, desenho e cache. [nfsmw-nx](https://github.com/StevensND/nfsmw-nx)
@@ -73,6 +83,18 @@ Veja de onde veio cada parte e como outros ports tratam instalação e dados ori
 
 Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. The build tools generate the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.46) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
-## Licenças e dados do jogo
+**Original game and legal notice.** *Dragon Ball Z: Budokai 3* was developed by **Dimps** and published by **Bandai** and **Atari**. *Dragon Ball Z: Budokai HD Collection* was published by **Namco Bandai Games**, now **Bandai Namco Entertainment**. *Dragon Ball* was created by **Akira Toriyama**. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION. This is a non-commercial fan project. It is **not affiliated with or endorsed by** Bandai Namco, Dimps, Atari, Shueisha, Toei Animation, Bird Studio, Microsoft or Nintendo. This repository contains no game code or assets. You must own the original disc and make your own dump. Rights holders with a concern can open an issue, and the material will be reviewed or removed promptly.
 
-O código deste port segue a GPL-3.0. Os componentes de terceiros conservam suas licenças em [`licenses/`](licenses/) e nas próprias árvores. O repositório distribui código, configurações, ferramentas e capturas para documentação. O dump, executáveis do jogo, recompilação gerada, caches derivados, arquivos de arte extraídos, saves e NROs gerados ficam no computador de quem compila. *Dragon Ball* e *Budokai* pertencem aos respectivos titulares. Este projeto é independente.
+## Aviso legal
+
+Este é um projeto de fãs, não oficial e sem fins lucrativos. **Não tem afiliação, patrocínio nem aprovação** da Bandai Namco Entertainment, Dimps, Atari, Shueisha, Toei Animation, Bird Studio, Microsoft ou Nintendo.
+
+- *Dragon Ball*, *Dragon Ball Z* e *Budokai* são marcas e obras protegidas dos respectivos titulares. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION. O jogo é © Bandai Namco Entertainment Inc.
+- *Xbox 360* é marca da Microsoft Corporation e *Nintendo Switch* é marca da Nintendo. Os nomes aparecem aqui só para indicar compatibilidade.
+- Este repositório **não distribui** o jogo, seus executáveis, arquivos de dados, áudio, vídeo, texturas, código recompilado nem chaves. Para compilar, é preciso um disco original adquirido legalmente e um dump feito pela própria pessoa. Não peça nem compartilhe ISOs ou NROs que contenham dados do jogo.
+- As capturas em `docs/screenshots/` servem só para documentar o funcionamento do port. As imagens do jogo continuam pertencendo aos titulares.
+- Titulares de direitos com alguma objeção podem abrir uma [issue](https://github.com/ramonDias07/Budokai3-nx/issues). O material será revisto ou removido prontamente.
+
+## Licenças
+
+O código deste port segue a GPL-3.0. Os componentes de terceiros mantêm suas licenças em [`licenses/`](licenses/) e nas próprias árvores. A GPL-3.0 vale apenas para o código deste repositório e não cobre o jogo original nem os dados extraídos dele. O dump, os executáveis do jogo, a recompilação gerada, os caches derivados, os arquivos de arte extraídos, os saves e os NROs gerados ficam no computador de quem compila.
