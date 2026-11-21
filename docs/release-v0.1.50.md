@@ -45,7 +45,7 @@ Referência da 0.1.46: teto de 40 FPS a 307 MHz de GPU deu 40,0 FPS com GPU de 2
 - **GPU boost volta ao normal de verdade.** A etapa que aplicava o boost nunca guardava a configuração original do console, então a restauração não fazia nada e a GPU ficava em 460 MHz mesmo com o boost desligado. Agora o clock original é restaurado ao desligar, pelo menu ou ao trocar de perfil.
 - **Boost oficial nos perfis DEFAULT e PERFORMANCE:** usa a configuração portátil oficial **GPU 460,8 MHz + RAM 1.600 MHz** (`0x92220007`), a mesma usada por jogos comerciais, sem overclock. Nova opção **BOOST WITH RAM 1600** nos ajustes avançados, aplicada ao vivo.
 - **GAME TIME** em ordem: 30, 35, 40, 45, 50, 55 e 60.
-- **Dock, experimental:** resolução interna **1080P** (escala 1,5) e saída **1440P** (2560x1440). O HDMI do Switch 1 entrega no máximo 1080p, então a saída 1440 funciona como supersampling (mais nítida e mais pesada) e volta sozinha a 1080 se o sistema recusar. Referências: [TechRadar](https://techradar.com/news/is-nintendo-switch-4k-an-overview-of-resolution-on-the-portable-console) e a [Nintendo](https://www.nintendo.com/au/support/articles/how-to-adjust-the-display-settings-on-nintendo-switch-2/), que informa que o Switch 2 oferece 1440p.
+- **Dock, experimental:** resolução interna **1080P** (escala 1,5) e saída **1440P** (2560x1440). O HDMI do Switch 1 entrega no máximo 1080p, então a saída 1440 funciona como supersampling (mais nítida e mais pesada) e volta sozinha a 1080 se o sistema recusar. Referência: [TechRadar](https://techradar.com/news/is-nintendo-switch-4k-an-overview-of-resolution-on-the-portable-console).
 - **Conquistas** (`L + R + ←`) com os ícones do próprio jogo, lidos em tempo de execução do XEX do usuário (nada é distribuído). Nome e descrição pequena no menu e no aviso de desbloqueio; as bloqueadas aparecem em cinza. O carregamento dos ícones reaproveita a abordagem do overlay de conquistas para PC do ReXGlue (`sdk/src/ui/overlay/achievement_icon_cache.cpp`, de Rien Gupta, licença BSD 3-Clause). O rasterizador do Switch (desenho por CPU do overlay Deko3D em 2x) é código deste port.
 
 ### 0.1.48
@@ -59,9 +59,8 @@ Referência da 0.1.46: teto de 40 FPS a 307 MHz de GPU deu 40,0 FPS com GPU de 2
 
 - **A correção de verdade do áudio.** Os dois mixers do jogo (música e efeitos) eram chamados um depois do outro por um único Audio Worker: 2 x 2,8 ms passam dos 5,33 ms de cada quadro de áudio. Faltavam quadros e as caudas agudas de explosões e magias soavam como "caixa estourada". Agora há **um Audio Worker por cliente** e os dois mixers rodam em paralelo, em núcleos diferentes. A seção de cópia e envio continua serializada, porque o jogo usa um único buffer estático compartilhado (`0x8251F940`).
 - A cvar `audio_parallel_client_callbacks = false` volta ao modo antigo.
-- As mensagens de log passam a ser em inglês (o SDK base rexglue-sdk-nx, de nx-mod, trazia textos em espanhol).
+- As mensagens de log passam a ser em inglês.
 - O esquema de prioridades de thread (guest `0x3B`, áudio `0x2B`, apresentação `0x2C`) segue o do MarathonRecomp-NX e já estava no SDK.
-- **Autoria:** o diagnóstico e as duas correções de áudio (0.1.48 e 0.1.49) são trabalho deste port. Houve quem achasse que o port copiava o Budokai-NX; não é o caso.
 
 ### 0.1.50
 
@@ -73,7 +72,7 @@ Este port é um projeto independente. O que cada projeto contribuiu está em [do
 
 - **ReXGlue** (Rien Gupta, BSD 3-Clause): a abordagem de carregamento de ícones de conquista do overlay de PC.
 - **MarathonRecomp-NX:** esquema de prioridades de thread do Horizon.
-- **TechRadar** e **Nintendo:** limites de saída de vídeo usados nas opções de dock.
+- **TechRadar:** limite de saída de vídeo usado nas opções de dock.
 - Os créditos anteriores (Budokai-NX, NovaPowers, nfsmw-nx, ReXGlue SDK NX, sa2-nx, LoS1-nx, ds2-nx, SaltyNX, AMD FidelityFX, XenosRecomp, uam, SPIRV-Cross, deko3d e libnx) continuam valendo.
 - **Ramon (ramonDias07)**: manutenção, testes no Switch físico e validação.
 - **OpenAI Codex** e **Claude (Anthropic)**, com os modelos Claude Opus, Sonnet e Haiku via Claude Code: implementação, depuração e documentação, em colaboração com Ramon.
