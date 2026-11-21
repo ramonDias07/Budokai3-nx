@@ -28,16 +28,19 @@
 #include <rex/ui/keybinds.h>
 #include <rex/ui/overlay/achievement_notification.h>
 #include <rex/ui/superposicion.h>
+#include <rex/ui/window_switch.h>
 
 extern const rex::PPCImageInfo PPCImageConfig;
 REXCVAR_DECLARE(bool, switch_atajo_perfil_app);
 REXCVAR_DECLARE(bool, switch_contador_fps);
 REXCVAR_DECLARE(int32_t, b3_velocidade_jogo);
 REXCVAR_DECLARE(int32_t, b3_limite_fps_luta);
+REXCVAR_DECLARE(bool, b3_gpu_boost_ram1600);
 REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
 REXCVAR_DECLARE(int32_t, b3_deko_resolucao_saida);
 REXCVAR_DECLARE(int32_t, b3_deko_ampliador);
 REXCVAR_DECLARE(int32_t, audio_switch_tramas_en_cola);
+REXCVAR_DECLARE(bool, audio_switch_ocultar_faltas);
 REXCVAR_DEFINE_BOOL(b3_deko_musica_independente, true, "Budokai 3",
                     "Musica em tempo real. Desligue para comparar com a mistura da 0.1.32. Requer reiniciar.");
 REXCVAR_DEFINE_INT32(b3_audio_atraso_ms, 0, "Budokai 3", "Atraso da mistura de efeitos em milissegundos.");
@@ -94,7 +97,7 @@ int WindowStart(int row, int count, int visible) {
 // Profiles. The cvars are always the truth; options_ mirrors them for the renderer. A profile is its factory values plus
 // the overrides saved in b3_perfil_<profile> ("key=value;key=value"). DOCK is an overlay (internal 720, output 1080).
 // ---------------------------------------------------------------------------------------------------------------------
-enum Key { kTempo, kInterna, kSaida, kSombras, kDesfoque, kBloom, kDof, kBoost, kCopias, kZ, kKeyCount };
+enum Key { kTempo, kInterna, kSaida, kSombras, kDesfoque, kBloom, kDof, kBoost, kCopias, kZ, kRam, kKeyCount };
 
 struct ProfileKey {
   const char* id;
@@ -112,6 +115,7 @@ constexpr ProfileKey kKeys[kKeyCount] = {
     {"boost", "b3_gpu_boost"},
     {"copias", "b3_deko_reduzir_copias"},
     {"z", "b3_deko_restaurar_z"},
+    {"ram", "b3_gpu_boost_ram1600"},
 };
 
 struct ProfileDef {
@@ -126,13 +130,13 @@ struct ProfileDef {
 constexpr ProfileDef kProfiles[] = {
     {"default", "DEFAULT", "b3_perfil_default",
      "BALANCED LOOK AND SPEED: 45 FPS, FIGHTER SHADOWS ON, NO BLOOM, 720P, GPU BOOST IN HANDHELD",
-     {"45", "720", "1080", "true", "false", "false", "720", "true", "true", "true"}},
+     {"45", "720", "1080", "true", "false", "false", "720", "true", "true", "true", "true"}},
     {"performance", "PERFORMANCE", "b3_perfil_performance",
-     "LIGHTER LOAD: 40 FPS, NO SHADOWS OR BLOOM, LIGHTWEIGHT BLUR, GPU BOOST IN HANDHELD. USE IT IF DEFAULT DROPS FRAMES",
-     {"40", "720", "1080", "false", "true", "false", "720", "true", "true", "true"}},
+     "LIGHTER LOAD: 40 FPS, AUTO INTERNAL RESOLUTION, NO SHADOWS OR BLOOM, LIGHTWEIGHT BLUR, GPU BOOST IN HANDHELD. USE IT IF DEFAULT DROPS FRAMES",
+     {"40", "0", "1080", "false", "true", "false", "720", "true", "true", "true", "true"}},
     {"nooverclock", "NO OVERCLOCK", "b3_perfil_nooverclock",
-     "FOR STOCK CLOCKS: 960X540 INTERNAL, 720P OUTPUT, 40 FPS, NO SHADOWS OR BLOOM, NO GPU BOOST",
-     {"40", "540", "720", "false", "true", "false", "720", "false", "true", "true"}},
+     "FOR STOCK CLOCKS: AUTO INTERNAL RESOLUTION, 720P OUTPUT, 35 FPS, NO SHADOWS OR BLOOM, NO GPU BOOST",
+     {"35", "0", "720", "false", "true", "false", "720", "false", "true", "true", "false"}},
 };
 constexpr int kProfileCount = int(std::size(kProfiles));
 
@@ -356,12 +360,17 @@ class PortMenu {
     kSave, kRestore, kRows
   };
   static constexpr int kVisible = 13;
-  static constexpr std::array<int, 7> kTimes{60, 55, 50, 45, 40, 35, 30};
+  static constexpr std::array<int, 7> kTimes{30, 35, 40, 45, 50, 55, 60};
   static constexpr std::array<int, 4> kInternals{720, 540, 360, 0};
   static constexpr std::array<int, 3> kDofs{720, 540, 360};
-  static constexpr std::array<int, 4> kDockOutputs{1080, 900, 720, 540};
+  static constexpr std::array<int, 5> kDockInternals{1080, 720, 540, 360, 0};
+  static constexpr std::array<int, 5> kDockOutputs{1440, 1080, 900, 720, 540};
   static constexpr std::array<int, 3> kHandheldOutputs{720, 540, 360};
   static constexpr const char* kUpscalers[] = {"LINEAR", "CAS", "FSR1"};
+
+  std::span<const int> Internals() const {
+    return profiles_.Docked() ? std::span<const int>(kDockInternals) : std::span<const int>(kInternals);
+  }
 
   std::span<const int> Outputs() const {
     return profiles_.Docked() ? std::span<const int>(kDockOutputs) : std::span<const int>(kHandheldOutputs);
@@ -370,7 +379,7 @@ class PortMenu {
   int OutputHeight() const {
     const auto list = Outputs();
     const int value = std::atoi(rex::cvar::GetFlagByName("b3_deko_resolucao_saida").c_str());
-    return std::ranges::find(list, value) == list.end() ? list.front() : value;
+    return std::ranges::find(list, value) == list.end() ? (profiles_.Docked() ? 1080 : list.front()) : value;
   }
 
   static std::string Resolution(int height) { return fmt::format("{}X{}", height * 16 / 9, height); }
@@ -387,9 +396,18 @@ class PortMenu {
       }
       case kInternal: {
         const int height = Number(kInterna);
-        return "INTERNAL RESOLUTION: " + (height == 0 ? std::string("AUTO") : Resolution(height));
+        return "INTERNAL RESOLUTION: " + (height == 0      ? std::string("AUTO")
+                                          : height == 1080 ? std::string("1080P (EXPERIMENTAL)")
+                                                           : Resolution(height));
       }
-      case kOutput: return "OUTPUT RESOLUTION: " + Resolution(OutputHeight());
+      case kOutput: {
+        const int height = OutputHeight();
+        if (height == 1440) {
+          return std::string("OUTPUT RESOLUTION: ") +
+                 (rex::ui::g_saida_1440_recusada.load() ? "1440P (REFUSED, 1080)" : "1440P (EXPERIMENTAL)");
+        }
+        return "OUTPUT RESOLUTION: " + Resolution(height);
+      }
       case kUpscaler: {
         const int mode = std::clamp(REXCVAR_GET(b3_deko_ampliador), 0, 2);
         return std::string("UPSCALER: ") + kUpscalers[mode];
@@ -416,13 +434,15 @@ class PortMenu {
       }
       case kTime:
         return "BATTLES AND THE DRAGON UNIVERSE MAP RUN AT REAL SPEED CAPPED AT THIS FPS. CHOOSE 30, 35, 40, 45, 50, 55 OR 60. 40 FEELS SMOOTH, 30 SAVES THE MOST POWER, 60 KEEPS THE "
-               "ORIGINAL TIMING.";
+               "ORIGINAL TIMING. FRAME RATE CAP 30 TO 60 FPS. LEFT LOWERS, RIGHT RAISES.";
       case kInternal:
         return "SIZE THE GAME DRAWS AT. LOWER IS FASTER BUT SOFTER. AUTO PICKS 720P OR 540P BY GPU LOAD. NEVER ABOVE "
-               "THE OUTPUT SIZE.";
+               "THE OUTPUT SIZE. 1080P (EXPERIMENTAL, DOCK ONLY): RENDERS AT 1920X1080, HEAVIER ON GPU; FALLS BACK TO 720 IF "
+               "MEMORY IS SHORT.";
       case kOutput:
         return "SIZE OF THE IMAGE SENT TO THE SCREEN, SEPARATE FROM INTERNAL. IF IT IS BIGGER THAN INTERNAL THE "
-               "UPSCALER STRETCHES IT. DOCKED 1080P LOOKS BEST. HANDHELD 720P IS NATIVE.";
+               "UPSCALER STRETCHES IT. DOCKED 1080P LOOKS BEST. HANDHELD 720P IS NATIVE. 1440P (EXPERIMENTAL, DOCK ONLY): DRAWS 2560X1440; THE SWITCH HDMI SENDS MAX 1080P, "
+               "SO IT IS SUPERSAMPLING (SHARPER, HEAVIER). FALLS BACK TO 1080 IF REFUSED.";
       case kUpscaler:
         return "USED WHEN INTERNAL IS LOWER THAN OUTPUT. LINEAR IS SOFT AND CHEAP, CAS SHARPENS (SEE SHARPNESS IN "
                "ADVANCED), FSR1 RESTORES THE MOST DETAIL BUT COSTS MORE GPU.";
@@ -480,7 +500,7 @@ class PortMenu {
     switch (row_) {
       case kProfile: profiles_.Select(NextIndex(profiles_.Active(), kProfileCount, direction)); break;
       case kTime: profiles_.Set(kTempo, std::to_string(Cycle(kTimes, Number(kTempo), direction))); break;
-      case kInternal: profiles_.Set(kInterna, std::to_string(Cycle(kInternals, Number(kInterna), direction))); break;
+      case kInternal: profiles_.Set(kInterna, std::to_string(Cycle(Internals(), Number(kInterna), direction))); break;
       case kOutput: profiles_.Set(kSaida, std::to_string(Cycle(Outputs(), OutputHeight(), direction))); break;
       case kUpscaler:
         rex::cvar::SetFlagByName("b3_deko_ampliador",
@@ -610,6 +630,8 @@ constexpr AdvancedOption kRenderOptions[] = {
 constexpr AdvancedOption kGpuOptions[] = {
     {"OFFICIAL GPU BOOST", "b3_gpu_boost",
      "HANDHELD ONLY. ASKS THE SYSTEM FOR ITS OFFICIAL 460 MHZ GPU MODE. DEFAULT AND PERFORMANCE USE IT IN HANDHELD, NO OVERCLOCK DOES NOT. DOES NOTHING DOCKED."},
+    {"BOOST WITH RAM 1600", "b3_gpu_boost_ram1600",
+     "OFFICIAL HANDHELD MODE GPU 460 + RAM 1600 (USED BY COMMERCIAL GAMES). CLEAN AUDIO AT STOCK CPU. APPLIES LIVE."},
     {"ZCULL", "b3_deko_zcull",
      "REJECTS HIDDEN PIXELS EARLY ON THE GPU. SAVES TIME IN MOST SCENES.", kBoolean, true},
     {"EARLY Z", "nfsmw_nativo_z_temprana", "TESTS DEPTH BEFORE SHADING SO HIDDEN PIXELS COST LESS."},
@@ -802,13 +824,71 @@ class AdvancedSettings {
 
 class AchievementsMenu {
  public:
+  // Opens the menu on the list (never straight on a detail card).
+  void Open(rex::system::AchievementManager& manager) {
+    detail_ = false;
+    Show(manager);
+  }
+
+  // B: closes the detail card back to the list (true: consumed); false when already on the list (the menu closes).
+  bool Back(rex::system::AchievementManager& manager) {
+    if (!detail_) return false;
+    detail_ = false;
+    Show(manager);
+    return true;
+  }
+
   void Show(rex::system::AchievementManager& manager, uint64_t pressed = 0) {
     const auto catalog = manager.ListAchievements();
     std::vector<std::string> lines{"BUDOKAI 3 / ACHIEVEMENTS"};
+    std::vector<rex::ui::IconoEnLinea> icons;
+    std::string marquee;
     if (catalog.empty()) {
+      detail_ = false;
       lines.emplace_back("NO ACHIEVEMENTS LOADED");
+    } else if (detail_) {
+      // Detail card (0.1.50): left/right move to the previous/next achievement, B (Back) returns to the list.
+      const int size = int(catalog.size());
+      int steps = 0;
+      if (pressed & HidNpadButton_Left) steps = -1;
+      if (pressed & HidNpadButton_Right) steps = 1;
+      row_ = std::clamp(row_ + steps, 0, size - 1);
+      const auto& item = catalog[row_];
+      const bool got = manager.IsUnlocked(item.id);
+      lines.push_back(fmt::format("ACHIEVEMENT {} OF {}", row_ + 1, size));
+      // Lines 2-7: the 96x96 icon (columns 2-9) and, from column 11, the name in the big font (two lines each, up to two
+      // rows of 16 characters), then the state and the score. The big font leaves the line under it empty.
+      std::string indent(11, ' ');
+      if (!got) indent[2] = '\x02';
+      const auto name = WrapWords(MenuText(item.label, 64), 16, 2);
+      rex::ui::IconoCompartido icon = Icon(item.image_id, 96);
+      if (icon) {
+        rex::ui::IconoEnLinea entry;
+        entry.linea = 2;
+        entry.columna = 2;
+        entry.filas = 6;
+        entry.gris = !got;
+        entry.icono = std::move(icon);
+        icons.push_back(std::move(entry));
+      }
+      for (size_t i = 0; i < 2; ++i) {
+        lines.push_back(i < name.size() ? indent + '\x03' + name[i] : indent);
+        lines.push_back(indent);
+      }
+      lines.push_back(indent + fmt::format("{}  {} G", got ? "UNLOCKED" : "LOCKED", item.gamerscore));
+      lines.push_back("");
+      lines.push_back("");
+      const std::string_view description = got ? item.description : item.unachieved_description;
+      for (const auto& row : WrapWords(MenuText(description, 400), 42, 6)) {
+        lines.push_back(std::string(got ? " " : "\x02") + row);
+      }
+      while (lines.size() < 15) lines.emplace_back();
+      lines.emplace_back("L/R: PREVIOUS / NEXT / B: BACK");
+      marquee = "B: BACK TO LIST";
     } else {
-      constexpr int kPageRows = 8;
+      // Console style (0.1.47): each entry takes two lines, its icon (32x32, grey when locked) over both, the name and
+      // score on the first and the description in small type under it. The selected one's goes to the marquee too.
+      constexpr int kPageRows = 6;
       const int size = int(catalog.size());
       int steps = 0;
       if (pressed & HidNpadButton_Up) steps = -1;
@@ -816,33 +896,128 @@ class AchievementsMenu {
       if (pressed & HidNpadButton_Left) steps = -kPageRows;
       if (pressed & HidNpadButton_Right) steps = kPageRows;
       row_ = std::clamp(row_ + steps, 0, size - 1);
-      const auto unlocked = std::ranges::count_if(catalog, [&](const auto& item) {
-        return manager.IsUnlocked(item.id);
-      });
-      lines.push_back(fmt::format("{} OF {} UNLOCKED", unlocked, size));
+      if (pressed & HidNpadButton_A) {
+        detail_ = true;
+        Show(manager);
+        return;
+      }
+      int unlocked = 0;
+      uint32_t earned = 0, total = 0;
+      for (const auto& item : catalog) {
+        total += item.gamerscore;
+        if (manager.IsUnlocked(item.id)) {
+          ++unlocked;
+          earned += item.gamerscore;
+        }
+      }
+      lines.push_back(fmt::format("{} OF {} UNLOCKED / {} OF {} G", unlocked, size, earned, total));
       const int start = row_ / kPageRows * kPageRows;
       for (int i = start; i < std::min(start + kPageRows, size); ++i) {
         const auto& item = catalog[i];
-        const auto label = MenuText(item.label, 28);
-        lines.push_back(fmt::format("{}{} {} {} G", i == row_ ? "> " : "  ",
-                                    manager.IsUnlocked(item.id) ? "+" : "-", label, item.gamerscore));
+        const bool got = manager.IsUnlocked(item.id);
+        rex::ui::IconoCompartido icon = Icon(item.image_id);
+        // Columns 0-1: the cursor. Column 2 (under the icon): '\x02' dims the rest of a locked one. Columns 3-5: the
+        // icon, or + / - without one (the text-only layout). The name from column 6.
+        std::string line = i == row_ ? "> " : "  ";
+        line += got ? ' ' : '\x02';
+        line += icon ? "   " : (got ? " + " : " - ");
+        line += fmt::format("{} {} G", MenuText(item.label, 30), item.gamerscore);
+        if (icon) {
+          rex::ui::IconoEnLinea entry;
+          entry.linea = uint32_t(lines.size());
+          entry.columna = 2;
+          entry.filas = 2;
+          entry.gris = !got;
+          entry.icono = std::move(icon);
+          icons.push_back(std::move(entry));
+        }
+        lines.push_back(std::move(line));
+        // The description in the small font ('\x01') from column 6: two rows of ~76 characters.
+        const std::string_view description = got ? item.description : item.unachieved_description;
+        lines.push_back(std::string(got ? "      \x01" : "  \x02   \x01") + MenuText(description, 148));
       }
       const auto& item = catalog[row_];
-      std::string_view description = manager.IsUnlocked(item.id) ? item.description : item.unachieved_description;
-      for (int i = 0; i < 2 && !description.empty(); ++i) {
-        const size_t space = description.size() > 44 ? description.rfind(' ', 44) : std::string_view::npos;
-        const size_t split = i == 0 && space != std::string_view::npos ? space : description.size();
-        lines.push_back(MenuText(description.substr(0, split), 44));
-        description.remove_prefix(std::min(split + 1, description.size()));
-      }
+      const std::string_view description = manager.IsUnlocked(item.id) ? item.description : item.unachieved_description;
+      marquee = "A: DETAILS  ";
+      marquee += description.empty() ? MenuText(item.label, 400)
+                                     : MenuText(fmt::format("{}: {}", item.label, description), 400);
     }
-    lines.emplace_back("ARROWS: NAVIGATE / B: CLOSE");
-    rex::ui::FijarLetreiro({});
-    rex::ui::FijarSuperposicion(std::move(lines));
+    if (!detail_) lines.emplace_back("ARROWS: NAVIGATE / A: DETAILS / B: CLOSE");
+    rex::ui::FijarLetreiro(std::move(marquee));
+    rex::ui::FijarSuperposicionConIconos(std::move(lines), std::move(icons));
+  }
+
+  // The achievement's image from the game's XDBF (in the user's own XEX), decoded once and shared with the unlock
+  // notification. Null when it has none (the text-only layout). Only with the game's module loaded (title_xdbf()
+  // requires it): from a non-empty catalog (LoadAchievementsData read it from that XDBF) or from an unlock event.
+  static rex::ui::IconoCompartido Icon(uint32_t image_id, uint32_t max_side = 32) {
+    static std::mutex mutex;
+    static std::vector<std::tuple<uint32_t, uint32_t, rex::ui::IconoCompartido>> cache;
+    if (!image_id) return nullptr;
+    std::lock_guard lock(mutex);
+    for (const auto& [id, side, icon] : cache) {
+      if (id == image_id && side == max_side) return icon;
+    }
+    rex::system::KernelState* kernel = rex::system::kernel_state();
+    if (!kernel) return nullptr;
+    rex::ui::IconoCompartido icon;
+    const auto db = kernel->title_xdbf();
+    if (db.is_valid()) {
+      const auto block = db.GetEntry(rex::system::util::XdbfSection::kImage, image_id);
+      if (block) icon = rex::ui::DecodificarIcono(image_id, block.buffer, block.size, max_side);
+    }
+    if (!icon) REXLOG_INFO("[B3 Deko menu] achievement without icon (image {}): text only", image_id);
+    cache.emplace_back(image_id, max_side, icon);  // a failure is remembered too
+    return icon;
   }
 
  private:
+  // Words wrapped to `width` columns, at most `max_rows` rows (the last ends in "..." if the text is cut). A word longer
+  // than a row is broken.
+  static std::vector<std::string> WrapWords(std::string_view text, size_t width, size_t max_rows) {
+    std::vector<std::string> rows;
+    std::string current;
+    bool cut = false;
+    size_t pos = 0;
+    while (pos < text.size() && !cut) {
+      while (pos < text.size() && text[pos] == ' ') ++pos;
+      const size_t end = std::min(text.find(' ', pos), text.size());
+      std::string word(text.substr(pos, end - pos));
+      pos = end;
+      while (!word.empty()) {
+        if (!current.empty() && current.size() + 1 + word.size() <= width) {
+          current += ' ' + word;
+          word.clear();
+        } else if (current.empty() && word.size() <= width) {
+          current = std::move(word);
+          word.clear();
+        } else {
+          if (!current.empty()) {
+            rows.push_back(std::move(current));
+            current.clear();
+          } else {
+            rows.push_back(word.substr(0, width));
+            word.erase(0, width);
+          }
+          if (rows.size() >= max_rows) {
+            cut = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!cut && !current.empty()) rows.push_back(std::move(current));
+    if (rows.size() > max_rows) rows.resize(max_rows);
+    if (cut && !rows.empty()) {
+      auto& last = rows.back();
+      if (last.size() + 3 > width) last.resize(width - 3);
+      last += "...";
+    }
+    return rows;
+  }
+
   int row_ = 0;
+  bool detail_ = false;
 };
 
 class DekoXenosApp final : public rex::ReXApp {
@@ -872,9 +1047,32 @@ class DekoXenosApp final : public rex::ReXApp {
           std::lock_guard lock(menu_mutex_);
           if (menu_owner_ != this) return;
           const auto& item = event.achievement;
-          rex::ui::AvisarSuperposicion({fmt::format("ACHIEVEMENT UNLOCKED / {} G", item.gamerscore),
-                                       MenuText(item.label, 44)});
-          REXLOG_INFO("[B3 Deko menu] aviso de conquista {}", item.id);
+          // Console style (0.1.47), top right for ~4 s: the icon over the first two lines (columns 0-2), the header
+          // and the name beside it, the description in small type under them. Without an icon, the same text from
+          // column 0.
+          rex::ui::IconoEnLinea notice_icon;
+          notice_icon.linea = 0;
+          notice_icon.columna = 0;
+          notice_icon.filas = 2;
+          notice_icon.icono = AchievementsMenu::Icon(item.image_id);
+          const std::string indent = notice_icon.icono ? "   " : "";
+          std::vector<std::string> lines{
+              indent + fmt::format("ACHIEVEMENT UNLOCKED  {} G", item.gamerscore),
+              indent + MenuText(item.label, 44 - indent.size())};
+          if (!item.description.empty()) {
+            // Two small rows as wide as the box (two small characters per column), broken at a space.
+            const size_t columns = std::max(lines[0].size(), lines[1].size());
+            const size_t width = std::max<size_t>(24, (columns - indent.size()) * 2);
+            std::string text = MenuText(item.description, width * 2);
+            if (text.size() > width) {
+              const size_t space = text.rfind(' ', width);
+              if (space != std::string::npos && space > 0) text[space] = '\n';
+            }
+            lines.push_back(indent + "\x01" + text);
+          }
+          const bool with_icon = bool(notice_icon.icono);
+          rex::ui::AvisarSuperposicionConIcono(std::move(lines), std::move(notice_icon));
+          REXLOG_INFO("[B3 Deko menu] aviso de conquista {} (icone {})", item.id, with_icon ? "sim" : "nao");
         });
   }
 
@@ -910,10 +1108,8 @@ class DekoXenosApp final : public rex::ReXApp {
     REXLOG_INFO("[B3 audio] modo={} atraso={} ms",
                 separate_music ? "musica_independente" : "mistura_0.1.32", delay);
     profiles_.Startup();
-    if (profiles_.Active() == 2 && REXCVAR_GET(audio_switch_tramas_en_cola) == 10) {
-      REXCVAR_SET(audio_switch_tramas_en_cola, 14);
-      REXLOG_INFO("[B3 audio] perfil sem overclock: 14 tramas em cola (75 ms) contra estalos");
-    }
+    // Concealment of late guest effect frames is on in every profile (0.1.48): the late frames happen at stock CPU
+    // in all of them. The cvar (audio_switch_ocultar_faltas, default true) can still turn it off.
     config.graphics = b3::CreateXenosDeko(package_ / "b3_shaders.nfsp", options_);
     REXLOG_INFO("B3: standard ReXGlue Xenos command processor, Deko3D backend, package {}",
                 package_.string());
@@ -975,7 +1171,7 @@ class DekoXenosApp final : public rex::ReXApp {
     switch (menu_) {
       case Menu::kQuick: port_menu_->Open(); break;
       case Menu::kAdvanced: advanced_->Open(); break;
-      case Menu::kAchievements: achievements_menu_.Show(achievements()); break;
+      case Menu::kAchievements: achievements_menu_.Open(achievements()); break;
       case Menu::kClosed: return;
     }
     REXLOG_INFO("[B3 Deko menu] {} aberto", menu_ == Menu::kQuick ? "rapido" :
@@ -1005,7 +1201,12 @@ class DekoXenosApp final : public rex::ReXApp {
                                   HidNpadButton_L | HidNpadButton_R;
     const uint64_t pressed = (buttons & ~previous) & controls;
     if (pressed & HidNpadButton_B) {
-      if (app.menu_ != Menu::kAdvanced || !app.advanced_->Back()) app.CloseMenu();
+      // B on an achievement's detail card goes back to the list (0.1.50); only B on the list closes the menu.
+      if (app.menu_ == Menu::kAchievements && app.achievements_menu_.Back(app.achievements())) {
+        // consumed by the detail card
+      } else if (app.menu_ != Menu::kAdvanced || !app.advanced_->Back()) {
+        app.CloseMenu();
+      }
     } else if (pressed) {
       if (app.menu_ == Menu::kQuick && !app.port_menu_->Press(pressed)) app.CloseMenu();
       if (app.menu_ == Menu::kAdvanced && !app.advanced_->Press(pressed)) app.CloseMenu();

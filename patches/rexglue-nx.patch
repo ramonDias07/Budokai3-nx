@@ -1,8 +1,17 @@
 diff --git a/include/rex/audio/audio_system.h b/include/rex/audio/audio_system.h
-index 28e92e7..aa8a284 100644
+index 28e92e7..25d5480 100644
 --- a/include/rex/audio/audio_system.h
 +++ b/include/rex/audio/audio_system.h
-@@ -28,6 +28,9 @@ class ByteStream;
+@@ -12,6 +12,8 @@
+ #pragma once
+ 
+ #include <atomic>
++#include <condition_variable>
++#include <mutex>
+ #include <queue>
+ 
+ #include <rex/kernel.h>
+@@ -28,6 +30,9 @@ class ByteStream;
  
  namespace rex::audio {
  
@@ -12,11 +21,111 @@ index 28e92e7..aa8a284 100644
  constexpr memory::fourcc_t kAudioSaveSignature = memory::make_fourcc("XAUD");
  
  class AudioDriver;
+@@ -35,8 +40,9 @@ class XmaDecoder;
+ 
+ // Hook before each audio frame requested from the game (robotic audio in the alley crashes): the app
+ // can wait there until the game's audio server thread has its packet, instead of letting the frame go
+-// out with that voice silent. Called by the Audio Worker thread right before the client callback, with
+-// no game locks held. nullptr = none.
++// out with that voice silent. Called by an Audio Worker thread right before the client callback, with
++// no game locks held. With audio_parallel_client_callbacks it can run concurrently for DIFFERENT
++// clients (never twice at once for the same client), so it must be thread-safe. nullptr = none.
+ using GanchoAntesDeTrama = void (*)(size_t client_index);
+ void SetGanchoAntesDeTrama(GanchoAntesDeTrama gancho);
+ 
+@@ -58,7 +64,7 @@ class AudioSystem : public system::IAudioSystem {
+   bool Save(stream::ByteStream* stream);
+   bool Restore(stream::ByteStream* stream);
+ 
+-  bool is_paused() const { return paused_; }
++  bool is_paused() const { return paused_.load(); }
+   void Pause();
+   void Resume();
+ 
+@@ -67,7 +73,13 @@ class AudioSystem : public system::IAudioSystem {
+ 
+   virtual void Initialize();
+ 
+-  void WorkerThreadMain();
++  // Worker 0 serves every client without a dedicated worker (all of them when
++  // audio_parallel_client_callbacks is off); worker N > 0 serves only client N.
++  void WorkerThreadMain(size_t worker_index);
++  void RunClientCallback(size_t worker_index, size_t client_index, uint32_t& diag_pump_count);
++  bool EnsureClientWorker(size_t client_index);
++  bool CreateWorker(size_t worker_index);
++  void WaitWhilePaused();
+ 
+   virtual X_STATUS CreateDriver(size_t index, rex::thread::Semaphore* semaphore,
+                                 AudioDriver** out_driver) = 0;
+@@ -81,10 +93,34 @@ class AudioSystem : public system::IAudioSystem {
+   uint32_t queued_frames_;
+ 
+   std::atomic<bool> worker_running_ = {false};
+-  system::object_ref<system::XHostThread> worker_thread_;
++  system::KernelState* kernel_state_ = nullptr;
+ 
+   rex::thread::global_critical_region global_critical_region_;
+   static const size_t kMaximumClientCount = 8;
++
++  // Host "Audio Worker" threads, one per render client when audio_parallel_client_callbacks is on.
++  // Why: each guest render callback wakes that client's guest mixer thread and waits for it. At
++  // CPU 1020 MHz a callback takes 2.62 ms idle and 2.7-2.85 ms in fights, so two clients run one
++  // after the other need ~5.6 ms per 5.33 ms output period (256 samples at 48 kHz) and 60-260
++  // frames per 10 s are missing (harsh effect tails). With one worker per client both mixers run
++  // at the same time on different cores and each client gets the whole period.
++  struct Worker {
++    system::object_ref<system::XHostThread> thread;
++    // Wakes the worker to re-check pause/shutdown (and, for worker 0, its client list).
++    std::unique_ptr<rex::thread::Event> wake_event;
++  };
++  Worker workers_[kMaximumClientCount];
++  std::mutex workers_mutex_;  // creation/destruction of workers_[i].thread
++  bool parallel_callbacks_ = false;  // audio_parallel_client_callbacks, read in Setup
++  // Set once client N has its own worker: worker 0 stops waiting on that client's semaphore.
++  std::atomic<bool> dedicated_worker_[kMaximumClientCount] = {};
++  // Held while a client's callback runs, so two workers never run the SAME client's callback
++  // at once (worker 0 may still be waiting on a semaphore when its dedicated worker starts).
++  std::mutex client_callback_mutex_[kMaximumClientCount];
++  // Held by a worker while it runs guest callback code, released only while that code blocks in
++  // a guest kernel wait (SetMutexReleasedDuringGuestWaits). The callback stages every client's
++  // frame in one static guest buffer, so only the wait for the mixer may overlap.
++  std::mutex guest_callback_mutex_;
+   struct {
+     AudioDriver* driver;
+     uint32_t callback;
+@@ -96,13 +132,13 @@ class AudioSystem : public system::IAudioSystem {
+   int FindFreeClient();
+ 
+   std::unique_ptr<rex::thread::Semaphore> client_semaphores_[kMaximumClientCount];
+-  // Event is always there in case we have no clients.
+-  std::unique_ptr<rex::thread::Event> shutdown_event_;
+-  rex::thread::WaitHandle* wait_handles_[kMaximumClientCount + 1];
+ 
+-  bool paused_ = false;
+-  rex::thread::Fence pause_fence_;
+-  std::unique_ptr<rex::thread::Event> resume_event_;
++  // Pause: every started worker parks in WaitWhilePaused; Pause() returns once all of them have.
++  std::atomic<bool> paused_ = {false};
++  std::mutex pause_mutex_;
++  std::condition_variable pause_cv_;
++  size_t worker_count_ = 0;     // started workers (pause_mutex_)
++  size_t paused_workers_ = 0;   // workers parked in WaitWhilePaused (pause_mutex_)
+ };
+ 
+ }  // namespace rex::audio
 diff --git a/include/rex/audio/switch/switch_audio_system.h b/include/rex/audio/switch/switch_audio_system.h
-index d62f871..e8aa94e 100644
+index d62f871..a3b5092 100644
 --- a/include/rex/audio/switch/switch_audio_system.h
 +++ b/include/rex/audio/switch/switch_audio_system.h
-@@ -21,6 +21,11 @@
+@@ -8,6 +8,7 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <memory>
+ #include <mutex>
+ #include <queue>
+@@ -21,6 +22,11 @@
  
  namespace rex::audio::nx {
  
@@ -28,19 +137,23 @@ index d62f871..e8aa94e 100644
  // One guest render client. SubmitFrame copies the guest frame and returns;
  // the output thread of SwitchAudioSystem consumes it.
  class SwitchAudioDriver final : public AudioDriver {
-@@ -36,8 +41,9 @@ class SwitchAudioDriver final : public AudioDriver {
+@@ -36,9 +42,12 @@ class SwitchAudioDriver final : public AudioDriver {
  
    // Output thread only. Folds the oldest queued frame to stereo and adds it to
    // stereo_out (kChannelSamples interleaved pairs), then releases the guest
 -  // semaphore for it if release is set (sin audio_switch_bomba). Returns false,
 -  // touching nothing, if no frame is queued.
+-  bool MixFrameInto(float* stereo_out, const StereoFold& fold, float gain, bool release);
 +  // semaphore for it if release is set (sin audio_switch_bomba). Returns false
 +  // if no frame is queued; then it only adds a short fade-out of the client's
 +  // last sample (anti-click), and the next frame that arrives fades in.
-   bool MixFrameInto(float* stereo_out, const StereoFold& fold, float gain, bool release);
++  // With audio_switch_ocultar_faltas (and is_music false) a missing frame repeats the last one attenuated
++  // (max 2 times) before falling back to the fade-out.
++  bool MixFrameInto(float* stereo_out, const StereoFold& fold, float gain, bool release, bool is_music);
  
    // Output thread, with audio_switch_bomba: frames delivered by the game, not yet mixed, and one more
-@@ -50,6 +56,10 @@ class SwitchAudioDriver final : public AudioDriver {
+   // frame request (a semaphore release).
+@@ -50,6 +59,14 @@ class SwitchAudioDriver final : public AudioDriver {
    std::mutex frames_mutex_;
    std::queue<float*> frames_queued_;
    std::stack<float*> frames_unused_;
@@ -48,10 +161,14 @@ index d62f871..e8aa94e 100644
 +  // frame was missing (the game did not deliver it in time: CPU at 1020 MHz with RAM at 1331 MHz).
 +  float ultima_amostra_[2] = {0.0f, 0.0f};
 +  bool faltou_ = false;
++  // Concealment (output thread only): last folded stereo frame and consecutive repeats played so far.
++  std::array<float, kChannelSamples * 2> ultimo_frame_{};
++  bool tem_ultimo_ = false;
++  uint32_t repeticoes_ = 0;
  };
  
  // audout accepts a single 48 kHz stereo s16 stream per process, while the
-@@ -79,9 +89,10 @@ class SwitchAudioSystem final : public AudioSystem {
+@@ -79,9 +96,10 @@ class SwitchAudioSystem final : public AudioSystem {
    void PumpTick();
  
    std::unique_ptr<Output> output_;
@@ -170,6 +287,38 @@ index f574d2d..4b1e731 100644
      setcsr(csr);
    }
  };
+diff --git a/include/rex/system/xobject.h b/include/rex/system/xobject.h
+index 0a43f07..a6258df 100644
+--- a/include/rex/system/xobject.h
++++ b/include/rex/system/xobject.h
+@@ -18,6 +18,7 @@
+ #include <vector>
+ 
+ #include <fmt/format.h>
++#include <mutex>
+ 
+ #include <rex/system/xmemory.h>
+ #include <rex/system/xtypes.h>
+@@ -32,6 +33,19 @@ class ByteStream;
+ 
+ namespace rex::system {
+ 
++// Host mutex that the calling thread releases while it blocks in a guest kernel wait
++// (XObject::Wait, XObject::WaitMultiple, XObject::SignalAndWait) and re-acquires before the
++// wait returns. Set it only while the thread holds the mutex; nullptr (the default) = none.
++//
++// Why: the Audio Workers run the guest render callbacks concurrently (one worker per client,
++// audio_parallel_client_callbacks), but that guest callback stages each frame in ONE static
++// buffer (0x8251F940) shared by every client, because on the 360 the callbacks are always
++// called one after the other. The workers therefore hold a common mutex while they run guest
++// code and drop it only while the callback waits for its guest mixer thread: the two mixers
++// overlap, the copy-to-static-buffer and submit sections never do.
++void SetMutexReleasedDuringGuestWaits(std::mutex* mutex);
++
++
+ constexpr memory::fourcc_t kXObjSignature = memory::make_fourcc('R', 'E', 'X', '\0');
+ 
+ class KernelState;
 diff --git a/include/rex/ui/deko3d/glsl.h b/include/rex/ui/deko3d/glsl.h
 index c3b6123..5f3014b 100644
 --- a/include/rex/ui/deko3d/glsl.h
@@ -186,10 +335,30 @@ index c3b6123..5f3014b 100644
  /*
   * The bits of the specialization value that change this shader's code. The pipeline key has one value for both
 diff --git a/include/rex/ui/deko3d/nucleo.h b/include/rex/ui/deko3d/nucleo.h
-index 18a7ed6..d4dcf95 100644
+index 18a7ed6..8f2e8a8 100644
 --- a/include/rex/ui/deko3d/nucleo.h
 +++ b/include/rex/ui/deko3d/nucleo.h
-@@ -157,8 +157,12 @@ class Nucleo {
+@@ -44,6 +44,19 @@ void Registro(const char* formato, ...) __attribute__((format(printf, 1, 2)));
+ void VaciarRegistro();
+ // Logs, flushes and ends the process.
+ [[noreturn]] void Fatal(const char* formato, ...) __attribute__((format(printf, 1, 2)));
++// 0.1.47, experimental 2560x1440 output: while a trial is open on this thread, a deko3d error raised by a call made
++// on this same thread is logged and counted instead of ending the process, so the caller can fall back. Errors of
++// other threads stay fatal. Not nested.
++void AbrirEnsayo();
++// An error was seen on this thread since AbrirEnsayo (its description in `motivo`, if given).
++bool EnsayoConError(char* motivo = nullptr, size_t bytes = 0);
++// Closes the trial; true if no error was seen.
++bool CerrarEnsayo(char* motivo = nullptr, size_t bytes = 0);
++// The effective mode (Reverse-NX's if it is active): true docked. For the docked-only experimental options.
++bool EnSobremesa();
++// Free bytes of the process heap, where deko3d's memory blocks come from: what was never handed out above the break
++// plus malloc's free blocks. An estimate, read before the experimental 1080 internal / 1440 output allocate.
++uint64_t MemoriaLibreHeap();
+ 
+ // ---- Time
+ // The CPU counter (19.2 MHz) in nanoseconds: cheap enough for per-draw timers.
+@@ -157,8 +170,12 @@ class Nucleo {
    // its end waits for every engine and invalidates the image, descriptor and shader caches. Texture uploads and
    // descriptor writes go here, so the draws recorded before and after them in comandos() all see them (the
    // Vulkan path's upload command buffer). Only with ConfigNucleo::kb_previos.
@@ -203,7 +372,7 @@ index 18a7ed6..d4dcf95 100644
      return previos_;
    }
    const ConfigNucleo& config() const { return config_; }
-@@ -247,6 +251,7 @@ class Nucleo {
+@@ -247,6 +264,7 @@ class Nucleo {
    DkCmdBuf comandos_ = nullptr;
    DkCmdBuf previos_ = nullptr;
    bool previos_usados_ = false;
@@ -211,6 +380,22 @@ index 18a7ed6..d4dcf95 100644
    uint64_t ns_esperando_valla_ = 0;
    DkMemBlock memoria_previos_ = nullptr;
    DkMemBlock subida_ = nullptr, memoria_comandos_ = nullptr, codigo_ = nullptr, descriptores_ = nullptr,
+@@ -284,10 +302,13 @@ class Presentacion {
+ 
+   // A swapchain of kImagenes RGBA8 images of that size on `ventana` (nullptr: the default window), in its own
+   // memory block. `intervalo` 0 presents at once (the Vulkan path's IMMEDIATE), 1 waits for vsync.
+-  void Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint32_t intervalo, NWindow* ventana = nullptr);
++  // False if it could not be made (only possible inside a trial, AbrirEnsayo: otherwise a failure ends the process);
++  // then nothing is left allocated.
++  bool Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint32_t intervalo, NWindow* ventana = nullptr);
+   // Waits for the GPU and frees it. Safe to call twice.
+   void Destruir();
+-  // Index of the image to draw into; the acquire is ordered on the queue before what is submitted next.
++  // Index of the image to draw into; the acquire is ordered on the queue before what is submitted next. -1 if the
++  // acquire failed inside a trial (AbrirEnsayo).
+   int Adquirir();
+   void Presentar(int imagen);
+   DkImage& Imagen(int i) { return imagenes_[i]; }
 diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
 index d703d34..4419b24 100644
 --- a/include/rex/ui/presenter.h
@@ -231,19 +416,35 @@ index d703d34..4419b24 100644
    }
 diff --git a/include/rex/ui/superposicion.h b/include/rex/ui/superposicion.h
 new file mode 100644
-index 0000000..5071840
+index 0000000..17a77f3
 --- /dev/null
 +++ b/include/rex/ui/superposicion.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,65 @@
 +// A few lines of text the deko3d presenter paints over the guest output (a game's options menu), centered in a black
 +// box with the FPS counter's dot font: no ImGui and no UI drawer, so presentation stays on the game's thread (a UI
 +// drawer moves every paint to the UI thread; Dead Space 3's screen went black that way). Upper-case letters, digits,
 +// space and . : / ( ) - + > ! , x, plus % ' = (build 0.1.43); lower case letters draw as upper case (except 'x', the
 +// times sign). Anything else is blank. The box holds 16 lines of 44 characters and, under them, the marquee line.
 +// Thread-safe; an empty list takes it away.
++//
++// Build 0.1.47 (achievements with icons, console/RetroArch style). The box is rasterized at twice its old resolution
++// on the CPU (same size on screen), which allows, with no new shader:
++//  - '\x01' in a line: the rest of the line is drawn in the small font (half size, grey), starting at the column of the
++//    marker. A small run holds two rows inside the line (it wraps at a space, or at '\n'); about 76 characters per row
++//    from column 6.
++//  - '\x02' in a line: a blank cell; the rest of the line is drawn dim grey (a locked achievement).
++//  - icons (IconoEnLinea): an RGBA image composited into the box, 16x16 texels in one line or 32x32 over its line and
++//    the next, from character column `columna` (the caller leaves those columns blank).
++// Build 0.1.50: '\x03' in a line: the rest of the line is drawn in the big font (each dot 4x4 texels, a character is two
++//    columns wide and two lines tall: leave the next line empty); from the marker's column, 16 characters at most fit
++//    from column 11. Icons may be up to 6 lines (see IconoEnLinea::filas).
++// The notification (AvisarSuperposicion*) box is cropped to the width of its widest line, in the top-right corner.
 +
 +#pragma once
 +
++#include <cstddef>
++#include <cstdint>
++#include <memory>
 +#include <string>
 +#include <vector>
 +
@@ -257,23 +458,66 @@ index 0000000..5071840
 +// with the menu (FijarSuperposicion), not with the notification (AvisarSuperposicion).
 +void FijarLetreiro(std::string texto);
 +
++// An icon: R8G8B8A8, straight alpha, `ancho` x `alto` texels (DecodificarIcono gives 32x32 at most).
++struct IconoSuperposicion {
++  uint32_t id = 0;  // the caller's key (an achievement's image id), only for logs
++  uint32_t ancho = 0, alto = 0;
++  std::vector<uint8_t> rgba;
++};
++using IconoCompartido = std::shared_ptr<const IconoSuperposicion>;
++
++struct IconoEnLinea {
++  uint32_t linea = 0;    // the line it starts on (0 = the first)
++  uint32_t columna = 0;  // the first character column it covers (16x16: two columns; 32x32: three)
++  uint32_t filas = 2;    // 1: 16x16 in its line; 2: 32x32 over its line and the next; n (up to 6): n*16 square texels
++                         // (6: 96x96, 8 character columns wide). A source smaller than that is scaled up bilinearly.
++  bool gris = false;     // drawn dark grey (luminance x 0.35): a locked achievement
++  IconoCompartido icono;  // null: nothing is drawn (the text-only layout)
++};
++
++// The menu with icons. FijarSuperposicion(lineas) is this with no icons.
++void FijarSuperposicionConIconos(std::vector<std::string> lineas, std::vector<IconoEnLinea> iconos);
++// The notification with one icon (a null icon: text only). AvisarSuperposicion(lineas) is this with no icon.
++void AvisarSuperposicionConIcono(std::vector<std::string> lineas, IconoEnLinea icono);
++// A PNG (an achievement image of the game's XDBF) decoded and box-filtered down to 32x32 at most. Null if it does not
++// decode.
++// `lado_maximo` (build 0.1.50, default 32) is the size it is reduced to: ask for 96 for an icon drawn over 6 lines.
++IconoCompartido DecodificarIcono(uint32_t id, const uint8_t* datos, size_t tamano, uint32_t lado_maximo = 32);
++
 +}  // namespace rex::ui
 diff --git a/include/rex/ui/switch_apm.h b/include/rex/ui/switch_apm.h
-index e0ab136..9538dc4 100644
+index e0ab136..52344ad 100644
 --- a/include/rex/ui/switch_apm.h
 +++ b/include/rex/ui/switch_apm.h
-@@ -35,6 +35,11 @@ void RexSwitchApmAplicar(void);
+@@ -35,6 +35,12 @@ void RexSwitchApmAplicar(void);
   */
  void RexSwitchApmVigilar(void);
  
 +/* Gives the console its original profile back (the boost off) so RexSwitchApmAplicar can ask again. */
-+void RexSwitchApmRestaurar(void);
++/* Returns 1 = restored ok or nothing to do, 0 = rejected / could not restore. */
++int RexSwitchApmRestaurar(void);
 +/* 1 while a profile requested by RexSwitchApmAplicar is active. */
 +int RexSwitchApmAtivo(void);
 +
  #ifdef __cplusplus
  }
  #endif
+diff --git a/include/rex/ui/window_switch.h b/include/rex/ui/window_switch.h
+index 5d7ef04..b3ca5de 100644
+--- a/include/rex/ui/window_switch.h
++++ b/include/rex/ui/window_switch.h
+@@ -20,6 +20,11 @@ namespace rex::ui {
+ 
+ class SwitchWindowedAppContext;
+ 
++// 0.1.47, experimental 2560x1440 output (b3_deko_resolucao_saida = 1440, docked): set by the presenter when the system
++// refuses it (or memory is short); from then on, for the session, QueryDisplayResolution gives 1920x1080 instead and
++// the UI loop re-evaluates the window size once.
++extern std::atomic<bool> g_saida_1440_recusada;
++
+ class WindowSwitch final : public Window {
+  public:
+   WindowSwitch(WindowedAppContext& app_context, const std::string_view title,
 diff --git a/include/rex/x360/deko/geometria.h b/include/rex/x360/deko/geometria.h
 index 1c5fe45..57ccc72 100644
 --- a/include/rex/x360/deko/geometria.h
@@ -296,7 +540,7 @@ index 1c5fe45..57ccc72 100644
      uint64_t fases[8] = {};        // the hash of each phase of its 64-byte lines (Huellas)
    };
 diff --git a/include/rex/x360/deko/render.h b/include/rex/x360/deko/render.h
-index 4cffec3..34f5e87 100644
+index 4cffec3..deed933 100644
 --- a/include/rex/x360/deko/render.h
 +++ b/include/rex/x360/deko/render.h
 @@ -24,11 +24,16 @@
@@ -609,7 +853,7 @@ index 4cffec3..34f5e87 100644
    void MaterializarFrontal();
    // Before a target's content changes (a pass binds it, a clear, a band): the pending front copy from it is made.
    void AntesDeCambiarDestino(const ImagenDk* destino) {
-@@ -270,6 +464,46 @@ class RenderDk final : public DestinosNativos {
+@@ -270,6 +464,51 @@ class RenderDk final : public DestinosNativos {
    // The images (and descriptors) of a render target and a resolved texture of the same size and format change places:
    // the resolve without a copy.
    void IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta);
@@ -641,6 +885,11 @@ index 4cffec3..34f5e87 100644
 +  void AplicarEscalaInterna(uint32_t altura, const char* motivo);
 +  uint32_t AlturaInternaDeseada() const;
 +  void ControlarEscalaInterna();
++  // 0.1.47: 1080 -> 1.5 (experimental, docked only), 540 -> 0.75, 360 -> 0.5, the rest 1.
++  static float EscalaDeAltura(uint32_t altura);
++  // Internal 1080: docked, and the heap has room for the scaled images at 1.5 (logged either way).
++  bool Admite1080(const char* cuando);
++  bool interna_1080_recusada_ = false;  // short of memory for 1080: 720 until the cvar leaves 1080
 +  uint32_t altura_interna_ = 720;
 +  uint32_t alto_salida_ = 0;  // the output height of the last paint (0 = not known yet)
 +  uint32_t escala_viva_cambios_ = 0;
@@ -656,7 +905,7 @@ index 4cffec3..34f5e87 100644
    // A render target whose content went to a resolved texture in a swap gets it back (copy), before it is drawn on or
    // resolved again; or, for the shadow map's car pass while the shadow minimum is applied, a clear instead.
    void RestaurarContenido(ImagenDk& destino, bool para_resolver);
-@@ -362,7 +596,7 @@ class RenderDk final : public DestinosNativos {
+@@ -362,7 +601,7 @@ class RenderDk final : public DestinosNativos {
    bool CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entrada);
    uint32_t CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_recorte, uint32_t modo_sc, float viewport[6],
                              float ndc[4], DkScissor& tijera);
@@ -665,7 +914,7 @@ index 4cffec3..34f5e87 100644
    // The DKSH of a library shader for that specialization value (masked) and, for a vertex shader, the
    // interpolators it keeps. nullptr if it cannot be had (logged once).
    // `variante_ps` (pixel shaders): kVariante* flags (nfsmw_dk_dibujos.cpp), part of the DKSH cache key; 0 is the
-@@ -392,8 +626,11 @@ class RenderDk final : public DestinosNativos {
+@@ -392,8 +631,11 @@ class RenderDk final : public DestinosNativos {
    // `valido_hasta`: the last frame the answer holds without asking again (a game texture until its next fingerprint
    // check; resolved textures and cubemaps, this frame only).
    uint32_t PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint32_t& ancho, uint32_t& alto, bool& puntual,
@@ -679,7 +928,7 @@ index 4cffec3..34f5e87 100644
    uint32_t SamplerDe(const uint32_t* f, bool puntual);
    uint32_t VaciaDe(uint16_t tipo_shader) const;
    bool LeerNivel(uint64_t direccion, bool mosaico, uint32_t pitch_bloques, uint64_t fila_bytes, const FormatoDk& tf,
-@@ -422,12 +659,40 @@ class RenderDk final : public DestinosNativos {
+@@ -422,12 +664,40 @@ class RenderDk final : public DestinosNativos {
    std::unordered_map<uint64_t, ImagenDk> destinos_;
    std::unordered_map<uint64_t, ImagenDk> profundidades_;
    std::unordered_map<uint32_t, Resuelta> resueltas_;
@@ -720,7 +969,7 @@ index 4cffec3..34f5e87 100644
    // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are
    // not counted). Totals since start, as TiempoGpu gives them.
    std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp
-@@ -481,6 +746,7 @@ class RenderDk final : public DestinosNativos {
+@@ -481,6 +751,7 @@ class RenderDk final : public DestinosNativos {
      uint64_t valido_hasta = 0;
      uint64_t generacion = 0;
      uint32_t ranura = 0, sampler = 0, ancho = 0, alto = 0;
@@ -728,7 +977,7 @@ index 4cffec3..34f5e87 100644
    };
    std::array<CacheFetch, 512> cache_fetch_{};
    uint64_t generacion_texturas_ = 1;  // goes up when a resolved texture appears or changes size
-@@ -501,6 +767,8 @@ class RenderDk final : public DestinosNativos {
+@@ -501,6 +772,8 @@ class RenderDk final : public DestinosNativos {
    };
    std::unordered_map<ClaveCargado, std::unique_ptr<DkShader>, HashCargado> cargados_;  // nullptr: failed
    deko::CacheDksh cache_;
@@ -737,7 +986,7 @@ index 4cffec3..34f5e87 100644
    bool cache_sucia_ = false;
    std::thread guardando_;  // writes the cache file (GuardarCacheSiHaceFalta)
    uint64_t cache_guardada_ns_ = 0;
-@@ -516,6 +784,7 @@ class RenderDk final : public DestinosNativos {
+@@ -516,6 +789,7 @@ class RenderDk final : public DestinosNativos {
    std::unordered_map<uint64_t, bool> en_fondo_;  // keys queued (by a hash of the key)
    DkShader fs_vacio_{};
    bool fs_vacio_valido_ = false;
@@ -745,7 +994,7 @@ index 4cffec3..34f5e87 100644
  
    // Vertex input (the same VS with the same patched fetches gives the same input)
    std::unordered_map<uint64_t, std::unique_ptr<EntradaVerticesDk>> entradas_;
-@@ -531,6 +800,7 @@ class RenderDk final : public DestinosNativos {
+@@ -531,6 +805,7 @@ class RenderDk final : public DestinosNativos {
      uint32_t pase_ancho = 0, pase_alto = 0;
      uint64_t pase_serie = 0;  // goes up at every pass change (the framing cache depends on it)
      const DkShader* vs = nullptr;
@@ -753,7 +1002,7 @@ index 4cffec3..34f5e87 100644
      const DkShader* ps = nullptr;
      DkRasterizerState raster{};
      DkColorState color{};
-@@ -641,6 +911,8 @@ class RenderDk final : public DestinosNativos {
+@@ -641,6 +916,8 @@ class RenderDk final : public DestinosNativos {
    // Constants: the last upload of each block, valid within one slot
    uint64_t constantes_vs_generacion_ = UINT64_MAX, constantes_ps_generacion_ = UINT64_MAX;
    uint32_t constantes_vs_bytes_ = 0, constantes_ps_bytes_ = 0;
@@ -762,7 +1011,7 @@ index 4cffec3..34f5e87 100644
    DkGpuAddr constantes_vs_gpu_ = 0, constantes_ps_gpu_ = 0;
    uint64_t constantes_trabajo_ = UINT64_MAX;
    // Constants by differences (nfsmw_dk_constantes_por_diferencias): one block per stage and work slot, written whole
-@@ -653,11 +925,11 @@ class RenderDk final : public DestinosNativos {
+@@ -653,11 +930,11 @@ class RenderDk final : public DestinosNativos {
    DkGpuAddr bloque_vs_ = 0, bloque_ps_ = 0, bloque_compartidas_ = 0;
    std::array<uint32_t, 1024> sombra_vs_{};  // 256 registers
    std::array<uint32_t, 896> sombra_ps_{};   // 224 registers
@@ -776,7 +1025,7 @@ index 4cffec3..34f5e87 100644
    uint32_t compartidas_previas_[kPalabrasCompartidas] = {};
    DkGpuAddr compartidas_gpu_ = 0;
    uint64_t compartidas_trabajo_ = UINT64_MAX;
-@@ -666,8 +938,8 @@ class RenderDk final : public DestinosNativos {
+@@ -666,8 +943,8 @@ class RenderDk final : public DestinosNativos {
    // Output: the guest output pass and the game's gamma ramp
    DkShader vs_salida_{};
    bool vs_salida_valido_ = false;
@@ -787,7 +1036,7 @@ index 4cffec3..34f5e87 100644
    std::array<std::array<uint16_t, 3>, 256> rampa_juego_{};
    std::array<float, 256 * 4 + 8> rampa_valores_{};
    ImagenDk rampa_tabla_;     // the ramp as a 256x1 RGBA32F texture (kFsRampa)
-@@ -703,4 +975,8 @@ class RenderDk final : public DestinosNativos {
+@@ -703,4 +980,8 @@ class RenderDk final : public DestinosNativos {
  std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* proveedor, rex::memory::Memory* memoria,
                                                      rex::x360::RenderHooks& hooks);  // default in nfsmw_dk_destinos.h
  
@@ -966,6 +1215,606 @@ index 1260153..f2cedee 100644
  if(REXGLUE_PLATFORM_SWITCH)
      # libnx audout backend
      target_sources(rexaudio PRIVATE switch/switch_audio_system.cpp)
+diff --git a/src/audio/audio_system.cpp b/src/audio/audio_system.cpp
+index eefee0e..4e174bf 100644
+--- a/src/audio/audio_system.cpp
++++ b/src/audio/audio_system.cpp
+@@ -22,16 +22,34 @@
+ #include <rex/stream.h>
+ #include <rex/string/buffer.h>
+ #include <rex/system/thread_state.h>
++#include <rex/system/xobject.h>
+ #include <rex/thread.h>
+ #include <rex/cvar.h>
+ 
++#include <chrono>
++#include <string>
++
++#include <fmt/format.h>
++
++// Perf counters (switch_perf.cpp, printed in rex_perfil.log).
++#if REX_PLATFORM_SWITCH
++extern "C" void RexSwitchPerfAdd(unsigned id, unsigned long long value);
++extern "C" void RexSwitchPerfMax(unsigned id, unsigned long long value);
++#endif
++
+ REXCVAR_DEFINE_INT32(
+     audio_maxqframes, 8, "Audio",
+     "Max buffered audio frames (range 4-64). Lower reduces latency but may cause stuttering.");
+ REXCVAR_DEFINE_BOOL(audio_diag_prioridad_critica, false, "Audio",
+-                    "Diagnostico (solo PC): Audio Worker y XMA Decoder a prioridad de tiempo critico, "
+-                    "como en la Switch, donde van por encima de los hilos del juego y no ceden el "
+-                    "nucleo mientras tienen trabajo");
++                    "Diagnostic (PC only): run the Audio Worker and XMA Decoder at time-critical "
++                    "priority, as on the Switch, where they sit above the game threads and do not "
++                    "give up the core while they have work");
++REXCVAR_DEFINE_BOOL(audio_parallel_client_callbacks, true, "Audio",
++                    "Run each audio render client's game callback on its own Audio Worker thread, so "
++                    "the game's music and effects mixers work at the same time on different cores "
++                    "(at CPU 1020 MHz the two callbacks take ~2.8 ms each, 5.6 ms in a row, over the "
++                    "5.33 ms audio period); false = one Audio Worker calls them one after the other, "
++                    "as before; read at startup");
+ 
+ // As with normal Microsoft, there are like twelve different ways to access
+ // the audio APIs. Early games use XMA*() methods almost exclusively to touch
+@@ -49,6 +67,9 @@ namespace rex::audio {
+ 
+ namespace {
+ constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
++// One output period: 256 samples at 48 kHz. A callback longer than this misses its frame even
++// when it has a worker of its own (counter 40).
++constexpr unsigned long long kAudioPeriodUs = 1000000ull * 256 / 48000;  // 5333
+ std::atomic<GanchoAntesDeTrama> g_gancho_antes_de_trama{nullptr};
+ }  // namespace
+ 
+@@ -69,16 +90,12 @@ AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
+   for (size_t i = 0; i < kMaximumClientCount; ++i) {
+     client_semaphores_[i] = rex::thread::Semaphore::Create(0, queued_frames_);
+     assert_not_null(client_semaphores_[i]);
+-    wait_handles_[i] = client_semaphores_[i].get();
++    // Always there, so a worker can be woken even when it has no client.
++    workers_[i].wake_event = rex::thread::Event::CreateAutoResetEvent(false);
++    assert_not_null(workers_[i].wake_event);
+   }
+-  shutdown_event_ = rex::thread::Event::CreateAutoResetEvent(false);
+-  assert_not_null(shutdown_event_);
+-  wait_handles_[kMaximumClientCount] = shutdown_event_.get();
+ 
+   xma_decoder_ = std::make_unique<rex::audio::XmaDecoder>(function_dispatcher_);
+-
+-  resume_event_ = rex::thread::Event::CreateAutoResetEvent(false);
+-  assert_not_null(resume_event_);
+ }
+ 
+ AudioSystem::~AudioSystem() {
+@@ -93,104 +110,217 @@ X_STATUS AudioSystem::Setup(system::KernelState* kernel_state) {
+     return result;
+   }
+ 
++  kernel_state_ = kernel_state;
++  parallel_callbacks_ = REXCVAR_GET(audio_parallel_client_callbacks);
++  REXAPU_INFO("AudioSystem: client callbacks {}",
++              parallel_callbacks_ ? "in parallel (one Audio Worker per client)"
++                                  : "serial (one Audio Worker for all clients)");
++
+   worker_running_ = true;
+-  worker_thread_ = system::object_ref<system::XHostThread>(
+-      new system::XHostThread(kernel_state, 128 * 1024, 0, [this]() {
+-        WorkerThreadMain();
++  if (!CreateWorker(0)) {
++    worker_running_ = false;
++    return X_STATUS_UNSUCCESSFUL;
++  }
++  return X_STATUS_SUCCESS;
++}
++
++bool AudioSystem::CreateWorker(size_t worker_index) {
++  assert_true(worker_index < kMaximumClientCount);
++  std::lock_guard<std::mutex> workers_lock(workers_mutex_);
++  if (!worker_running_ || workers_[worker_index].thread) {
++    return workers_[worker_index].thread != nullptr;
++  }
++
++  // Counted before it starts, so a Pause() issued meanwhile also waits for this worker.
++  {
++    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
++    ++worker_count_;
++  }
++  auto thread = system::object_ref<system::XHostThread>(
++      new system::XHostThread(kernel_state_, 128 * 1024, 0, [this, worker_index]() {
++        WorkerThreadMain(worker_index);
+         return 0;
+       }));
+-
+-  worker_thread_->set_name("Audio Worker");
+-  worker_thread_->Create();
++  // The "Audio Worker" prefix matters: SwitchPriorityFor (xthread.cpp) gives it the audio priority
++  // (0x2B) and the guest mixer detection (xboxkrnl_threading.cpp) recognises the worker by it.
++  thread->set_name(worker_index == 0 ? std::string("Audio Worker")
++                                     : fmt::format("Audio Worker {}", worker_index));
++  // Stored before Create(): the new thread reads workers_[worker_index].thread (thread_state).
++  workers_[worker_index].thread = thread;
++  const X_STATUS status = thread->Create();
++  if (XFAILED(status)) {
++    REXAPU_ERROR("AudioSystem: could not create Audio Worker {} ({:08X})", worker_index, status);
++    workers_[worker_index].thread.reset();
++    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
++    --worker_count_;
++    pause_cv_.notify_all();
++    return false;
++  }
+ #if REX_PLATFORM_WIN32
+   // Diagnostic audio_diag_prioridad_critica: as on the Switch, above the game threads
+   // (THREAD_PRIORITY_TIME_CRITICAL = 15).
+-  if (REXCVAR_GET(audio_diag_prioridad_critica) && worker_thread_->thread()) {
+-    worker_thread_->thread()->set_priority(15);
++  if (REXCVAR_GET(audio_diag_prioridad_critica) && thread->thread()) {
++    thread->thread()->set_priority(15);
+   }
+ #endif
++  return true;
++}
+ 
+-  return X_STATUS_SUCCESS;
++bool AudioSystem::EnsureClientWorker(size_t client_index) {
++  if (!parallel_callbacks_ || client_index == 0 || client_index >= kMaximumClientCount) {
++    return false;  // served by worker 0
++  }
++  if (dedicated_worker_[client_index].load(std::memory_order_acquire)) {
++    return true;
++  }
++  if (!CreateWorker(client_index)) {
++    return false;  // worker 0 keeps serving it
++  }
++  dedicated_worker_[client_index].store(true, std::memory_order_release);
++  // Worker 0 may be blocked on this client's semaphore: make it rebuild its wait list.
++  workers_[0].wake_event->Set();
++  REXAPU_INFO("AudioSystem: client {} now has its own Audio Worker", client_index);
++  return true;
+ }
+ 
+-void AudioSystem::WorkerThreadMain() {
++void AudioSystem::WaitWhilePaused() {
++  std::unique_lock<std::mutex> lock(pause_mutex_);
++  ++paused_workers_;
++  pause_cv_.notify_all();
++  pause_cv_.wait(lock, [this]() { return !paused_.load() || !worker_running_; });
++  --paused_workers_;
++}
++
++void AudioSystem::WorkerThreadMain(size_t worker_index) {
+   // Initialize driver and ringbuffer.
+-  Initialize();
++  if (worker_index == 0) {
++    Initialize();
++  }
+ 
+-  // Main run loop.
++  rex::thread::WaitHandle* wait_handles[kMaximumClientCount + 1];
++  size_t wait_clients[kMaximumClientCount];
+   uint32_t diag_pump_count = 0;
+   while (worker_running_) {
++    if (paused_.load()) {
++      WaitWhilePaused();
++      continue;
++    }
++
+     // These handles signify the number of submitted samples. Once we reach
+     // 64 samples, we wait until our audio backend releases a semaphore
+     // (signaling a sample has finished playing)
+-    auto result = rex::thread::WaitAny(wait_handles_, rex::countof(wait_handles_), true,
+-                                       std::chrono::milliseconds(500));
++    size_t count = 0;
++    if (worker_index == 0) {
++      for (size_t i = 0; i < kMaximumClientCount; ++i) {
++        if (!dedicated_worker_[i].load(std::memory_order_acquire)) {
++          wait_handles[count] = client_semaphores_[i].get();
++          wait_clients[count++] = i;
++        }
++      }
++    } else {
++      wait_handles[count] = client_semaphores_[worker_index].get();
++      wait_clients[count++] = worker_index;
++    }
++    wait_handles[count] = workers_[worker_index].wake_event.get();
++
++    auto result =
++        rex::thread::WaitAny(wait_handles, count + 1, true, std::chrono::milliseconds(500));
+     if (result.first == rex::thread::WaitResult::kFailed) {
+-      REXAPU_WARN("AudioWorker: WaitAny failed");
++      REXAPU_WARN("Audio Worker {}: WaitAny failed", worker_index);
++      rex::thread::Sleep(std::chrono::milliseconds(10));
+       continue;
+     }
+-
+     if (result.first == rex::thread::WaitResult::kTimeout) {
+       if (diag_pump_count < 5) {
+-        REXAPU_NOISY_DEBUG("AudioWorker: WaitAny timed out (no semaphore signals)");
++        REXAPU_NOISY_DEBUG("Audio Worker {}: WaitAny timed out (no semaphore signals)",
++                           worker_index);
+       }
++      continue;
+     }
+-
+-    if (result.first == thread::WaitResult::kSuccess && result.second == kMaximumClientCount) {
+-      // Shutdown event signaled.
+-      if (paused_) {
+-        pause_fence_.Signal();
+-        thread::Wait(resume_event_.get(), false);
+-      }
+-
++    if (result.first != rex::thread::WaitResult::kSuccess || result.second >= count) {
++      // Wake event (pause, shutdown or a new dedicated worker) or an APC: re-check at the top.
+       continue;
+     }
+ 
+-    // Number of clients pumped
+-    bool pumped = false;
+-    if (result.first == rex::thread::WaitResult::kSuccess) {
+-      auto index = result.second;
++    RunClientCallback(worker_index, wait_clients[result.second], diag_pump_count);
++  }
+ 
+-      auto global_lock = global_critical_region_.Acquire();
+-      uint32_t client_callback = clients_[index].callback;
+-      uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
+-      global_lock.unlock();
++  // TODO(benvanik): call module API to kill?
++}
+ 
+-      if (client_callback) {
+-        if (diag_pump_count < 10) {
+-          REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
+-                       client_callback, client_callback_arg, index);
+-        }
+-        if (const GanchoAntesDeTrama gancho = g_gancho_antes_de_trama.load(std::memory_order_acquire)) {
+-          gancho(index);
++void AudioSystem::RunClientCallback(size_t worker_index, size_t index, uint32_t& diag_pump_count) {
++  // Never the same client on two workers at once (see client_callback_mutex_).
++  std::lock_guard<std::mutex> client_lock(client_callback_mutex_[index]);
++
++  auto global_lock = global_critical_region_.Acquire();
++  uint32_t client_callback = clients_[index].callback;
++  uint32_t client_callback_arg = clients_[index].wrapped_callback_arg;
++  global_lock.unlock();
++
++  if (!client_callback) {
++    REXAPU_DEBUG("Audio Worker {}: semaphore signaled for client {} but callback is 0",
++                 worker_index, index);
++    return;
++  }
++  if (diag_pump_count < 10) {
++    REXAPU_DEBUG("Audio Worker {}: dispatching callback {:08X} with arg {:08X} for client {}",
++                 worker_index, client_callback, client_callback_arg, index);
++  }
++  if (const GanchoAntesDeTrama gancho = g_gancho_antes_de_trama.load(std::memory_order_acquire)) {
++    gancho(index);
++  }
++  SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
++  uint64_t args[] = {client_callback_arg};
++  // Diagnostics: time the guest callback. Slow callbacks at stock clocks are what leaves the output
++  // thread without frames (counters 33 max us, 34 sum us, 35 count, 38/39 max us of clients 0/1,
++  // 40 callbacks longer than one 5.333 ms period, in rex_perfil.log).
++  const auto cb_start = std::chrono::steady_clock::now();
++  {
++    // Parallel mode: guest callback code runs under guest_callback_mutex_, which is dropped only
++    // while the callback blocks in a guest wait (its wait for the mixer thread). The callback
++    // (sub_822A9968) copies the mixer output into one static buffer shared by all clients
++    // (0x8251F940) and submits it from there; on the 360 the callbacks never overlap, so that
++    // copy must not overlap here either. Only the mixers run concurrently.
++    struct GuestCallbackLock {
++      std::mutex* mutex;
++      explicit GuestCallbackLock(std::mutex* m) : mutex(m) {
++        if (mutex) {
++          mutex->lock();
++          system::SetMutexReleasedDuringGuestWaits(mutex);
+         }
+-        SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
+-        uint64_t args[] = {client_callback_arg};
+-        function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,
+-                                      rex::countof(args));
+-        if (diag_pump_count < 10) {
+-          REXAPU_DEBUG("AudioWorker: callback returned for client {}", index);
++      }
++      ~GuestCallbackLock() {
++        if (mutex) {
++          system::SetMutexReleasedDuringGuestWaits(nullptr);
++          mutex->unlock();
+         }
+-        diag_pump_count++;
+-      } else {
+-        REXAPU_DEBUG("AudioWorker: semaphore signaled for client {} but callback is 0", index);
+       }
+-
+-      pumped = true;
+-    }
+-
+-    if (!worker_running_) {
+-      break;
+-    }
+-
+-    if (!pumped) {
+-      SCOPE_profile_cpu_i("apu", "Sleep");
+-      rex::thread::Sleep(std::chrono::milliseconds(500));
+-    }
++    } guest_lock(parallel_callbacks_ ? &guest_callback_mutex_ : nullptr);
++    function_dispatcher_->Execute(workers_[worker_index].thread->thread_state(), client_callback,
++                                  args, rex::countof(args));
+   }
+-  worker_running_ = false;
+-
+-  // TODO(benvanik): call module API to kill?
++  const auto cb_us = static_cast<unsigned long long>(
++      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
++                                                            cb_start)
++          .count());
++#if REX_PLATFORM_SWITCH
++  RexSwitchPerfMax(33, cb_us);
++  RexSwitchPerfAdd(34, cb_us);
++  RexSwitchPerfAdd(35, 1);
++  if (index < 2) {
++    RexSwitchPerfMax(38 + unsigned(index), cb_us);
++  }
++  if (cb_us > kAudioPeriodUs) {
++    RexSwitchPerfAdd(40, 1);
++  }
++#else
++  (void)cb_us;
++  (void)kAudioPeriodUs;
++#endif
++  if (diag_pump_count < 10) {
++    REXAPU_DEBUG("Audio Worker {}: callback returned for client {}", worker_index, index);
++  }
++  diag_pump_count++;
+ }
+ 
+ int AudioSystem::FindFreeClient() {
+@@ -216,26 +346,50 @@ void AudioSystem::Shutdown() {
+     xma_decoder_->Shutdown();
+   }
+ 
+-  worker_running_ = false;
+-  shutdown_event_->Set();
+-  if (worker_thread_) {
+-    // The worker may be stuck inside a guest callback that is itself blocked on
+-    // guest objects (e.g. KeWaitForMultipleObjects), so terminating is the last
+-    // resort. Give it a chance to unwind first: TerminateThread abandons any
+-    // lock the thread holds, including the CRT heap lock.
+-    rex::thread::Thread* host_thread = worker_thread_->thread();
+-    bool exited = host_thread && rex::thread::Wait(host_thread, false, kWorkerShutdownTimeout) ==
+-                                     rex::thread::WaitResult::kSuccess;
+-    if (!exited) {
+-      REXAPU_WARN("Audio worker did not exit within {} ms; terminating",
+-                  kWorkerShutdownTimeout.count());
+-      worker_thread_->Terminate(0);
++  {
++    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
++    worker_running_ = false;
++  }
++  pause_cv_.notify_all();
++
++  {
++    std::lock_guard<std::mutex> workers_lock(workers_mutex_);
++    for (auto& worker : workers_) {
++      if (worker.thread) {
++        worker.wake_event->Set();
++      }
++    }
++    // One shared deadline: all workers together get the 500 ms the single worker had.
++    const auto deadline = std::chrono::steady_clock::now() + kWorkerShutdownTimeout;
++    for (size_t i = 0; i < kMaximumClientCount; ++i) {
++      auto& worker = workers_[i];
++      if (!worker.thread) {
++        continue;
++      }
++      // The worker may be stuck inside a guest callback that is itself blocked on
++      // guest objects (e.g. KeWaitForMultipleObjects), so terminating is the last
++      // resort. Give it a chance to unwind first: TerminateThread abandons any
++      // lock the thread holds, including the CRT heap lock.
++      const auto now = std::chrono::steady_clock::now();
++      const auto remaining =
++          now < deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
++                         : std::chrono::milliseconds(0);
++      rex::thread::Thread* host_thread = worker.thread->thread();
++      bool exited = host_thread && rex::thread::Wait(host_thread, false, remaining) ==
++                                       rex::thread::WaitResult::kSuccess;
++      if (!exited) {
++        REXAPU_WARN("Audio Worker {} did not exit within {} ms; terminating", i,
++                    kWorkerShutdownTimeout.count());
++        worker.thread->Terminate(0);
++      }
++      worker.thread.reset();
++      dedicated_worker_[i].store(false, std::memory_order_release);
+     }
+-    worker_thread_.reset();
+   }
+ 
+   // Destroy all active client drivers (closes SDL audio devices, stopping
+   // callback threads) before the semaphores they reference are destroyed.
++  auto global_lock = global_critical_region_.Acquire();
+   for (size_t i = 0; i < kMaximumClientCount; i++) {
+     if (clients_[i].in_use) {
+       DestroyDriver(clients_[i].driver);
+@@ -276,6 +430,11 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+   if (out_index) {
+     *out_index = index;
+   }
++  global_lock.unlock();
++
++  // Workers are created once per client slot and then kept (an unregistered slot just idles on
++  // its empty semaphore), so a register/unregister cycle never starts or joins threads again.
++  EnsureClientWorker(index);
+ 
+   return X_STATUS_SUCCESS;
+ }
+@@ -283,16 +442,20 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg, s
+ void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+   SCOPE_profile_cpu_f("apu");
+ 
+-  static uint32_t submit_count = 0;
+-  if (submit_count < 10) {
++  static std::atomic<uint32_t> submit_count{0};
++  if (submit_count.load(std::memory_order_relaxed) < 10) {
+     REXAPU_DEBUG("AudioSystem::SubmitFrame called: index={} samples_ptr={:08X}", index,
+                  samples_ptr);
+-    submit_count++;
++    submit_count.fetch_add(1, std::memory_order_relaxed);
+   }
+ 
+   auto global_lock = global_critical_region_.Acquire();
+   assert_true(index < kMaximumClientCount);
+-  assert_true(clients_[index].driver != NULL);
++  // A client unregistered while its callback was still running has no driver any more: drop the
++  // frame instead of dereferencing null.
++  if (index >= kMaximumClientCount || !clients_[index].driver) {
++    return;
++  }
+   (clients_[index].driver)->SubmitFrame(samples_ptr);
+ }
+ 
+@@ -315,6 +478,7 @@ void AudioSystem::UnregisterClient(size_t index) {
+ }
+ 
+ bool AudioSystem::Save(stream::ByteStream* stream) {
++  auto global_lock = global_critical_region_.Acquire();
+   stream->Write(kAudioSaveSignature);
+ 
+   // Count the number of used clients first.
+@@ -348,65 +512,95 @@ bool AudioSystem::Restore(stream::ByteStream* stream) {
+     return false;
+   }
+ 
+-  uint32_t num_clients = stream->Read<uint32_t>();
+-  for (uint32_t i = 0; i < num_clients; i++) {
+-    auto id = stream->Read<uint32_t>();
+-    assert_true(id < kMaximumClientCount);
++  bool restored[kMaximumClientCount] = {};
++  bool ok = true;
++  {
++    auto global_lock = global_critical_region_.Acquire();
++    uint32_t num_clients = stream->Read<uint32_t>();
++    for (uint32_t i = 0; i < num_clients; i++) {
++      auto id = stream->Read<uint32_t>();
++      assert_true(id < kMaximumClientCount);
+ 
+-    auto& client = clients_[id];
++      auto& client = clients_[id];
+ 
+-    // Reset the semaphore and recreate the driver ourselves.
+-    if (client.driver) {
+-      UnregisterClient(id);
+-    }
+-
+-    client.callback = stream->Read<uint32_t>();
+-    client.callback_arg = stream->Read<uint32_t>();
+-    client.wrapped_callback_arg = stream->Read<uint32_t>();
+-
+-    client.in_use = true;
++      // Reset the semaphore and recreate the driver ourselves.
++      if (client.driver) {
++        UnregisterClient(id);
++      }
+ 
+-    auto client_semaphore = client_semaphores_[id].get();
+-    auto ret = client_semaphore->Release(queued_frames_, nullptr);
+-    assert_true(ret);
++      client.callback = stream->Read<uint32_t>();
++      client.callback_arg = stream->Read<uint32_t>();
++      client.wrapped_callback_arg = stream->Read<uint32_t>();
++
++      client.in_use = true;
++
++      auto client_semaphore = client_semaphores_[id].get();
++      auto ret = client_semaphore->Release(queued_frames_, nullptr);
++      assert_true(ret);
++
++      AudioDriver* driver = nullptr;
++      auto status = CreateDriver(id, client_semaphore, &driver);
++      if (XFAILED(status)) {
++        REXAPU_ERROR(
++            "AudioSystem::Restore - Call to CreateDriver failed with status "
++            "{:08X}",
++            status);
++        ok = false;
++        break;
++      }
+ 
+-    AudioDriver* driver = nullptr;
+-    auto status = CreateDriver(id, client_semaphore, &driver);
+-    if (XFAILED(status)) {
+-      REXAPU_ERROR(
+-          "AudioSystem::Restore - Call to CreateDriver failed with status "
+-          "{:08X}",
+-          status);
+-      return false;
++      assert_not_null(driver);
++      client.driver = driver;
++      restored[id] = true;
+     }
+-
+-    assert_not_null(driver);
+-    client.driver = driver;
+   }
+ 
+-  return true;
++  // Outside the global lock, as in RegisterClient.
++  for (size_t id = 0; id < kMaximumClientCount; ++id) {
++    if (restored[id]) {
++      EnsureClientWorker(id);
++    }
++  }
++  return ok;
+ }
+ 
+ void AudioSystem::Pause() {
+-  if (paused_) {
++  if (paused_.load()) {
+     return;
+   }
+-  paused_ = true;
++  {
++    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
++    paused_ = true;
++  }
+ 
+-  // Kind of a hack, but it works.
+-  shutdown_event_->Set();
+-  pause_fence_.Wait();
++  // Wake every worker so it parks in WaitWhilePaused, then wait until all of them have. A worker
++  // busy in a guest callback parks when the callback returns (as the single worker did).
++  {
++    std::lock_guard<std::mutex> workers_lock(workers_mutex_);
++    for (auto& worker : workers_) {
++      if (worker.thread) {
++        worker.wake_event->Set();
++      }
++    }
++  }
++  {
++    std::unique_lock<std::mutex> pause_lock(pause_mutex_);
++    pause_cv_.wait(pause_lock,
++                   [this]() { return paused_workers_ >= worker_count_ || !worker_running_; });
++  }
+ 
+   xma_decoder_->Pause();
+ }
+ 
+ void AudioSystem::Resume() {
+-  if (!paused_) {
++  if (!paused_.load()) {
+     return;
+   }
+-  paused_ = false;
+-
+-  resume_event_->Set();
++  {
++    std::lock_guard<std::mutex> pause_lock(pause_mutex_);
++    paused_ = false;
++  }
++  pause_cv_.notify_all();
+ 
+   xma_decoder_->Resume();
+ }
 diff --git a/src/audio/switch/audio_tempo.h b/src/audio/switch/audio_tempo.h
 new file mode 100644
 index 0000000..9dbfa15
@@ -1076,7 +1925,7 @@ index 0000000..9dbfa15
 +
 +}  // namespace rex::audio::nx
 diff --git a/src/audio/switch/switch_audio_system.cpp b/src/audio/switch/switch_audio_system.cpp
-index 6a9dc8d..0055748 100644
+index 6a9dc8d..8068b22 100644
 --- a/src/audio/switch/switch_audio_system.cpp
 +++ b/src/audio/switch/switch_audio_system.cpp
 @@ -8,6 +8,8 @@
@@ -1088,7 +1937,38 @@ index 6a9dc8d..0055748 100644
  #include <algorithm>
  #include <array>
  #include <atomic>
-@@ -49,7 +51,11 @@ namespace {
+@@ -29,15 +31,22 @@ extern "C" void RexSwitchPerfMax(unsigned id, u64 value);
+ 
+ REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
+ REXCVAR_DEFINE_BOOL(audio_switch_bomba, true, "Audio",
+-                    "Pedir al juego una trama cada 5,333 ms (bomba de 187,5 Hz, como "
+-                    "MarathonRecomp-NX) en vez de 4 seguidas al consumir cada bufer de audout, que "
+-                    "dejaban sin paquete a la voz del servidor de audio del juego (audio robotico); "
+-                    "se lee al abrir el audio");
++                    "Request one frame from the game every 5.333 ms (187.5 Hz pump, as in "
++                    "MarathonRecomp-NX) instead of 4 in a row each time an audout buffer is consumed, "
++                    "which left the game's audio server voice without its packet (robotic audio); "
++                    "read when audio is opened");
++// Concealment of late guest frames. At stock clocks (CPU 1020 / RAM 1331) the guest delivers 100-250 effect frames
++// per 10 s too late; repeating the previous frame (attenuated) hides the hole better than a fade to silence.
++// The music client is never touched. On by default in every profile (0.1.48).
++REXCVAR_DEFINE_BOOL(audio_switch_ocultar_faltas, true, "Audio",
++                    "If an effects client's frame is missing (the game was late), repeat its last frame "
++                    "attenuated (0.7 then 0.45, at most 2 times) instead of dropping to silence; music is "
++                    "never touched");
+ REXCVAR_DEFINE_INT32(audio_switch_tramas_en_cola, 10, "Audio",
+-                     "Con audio_switch_bomba: tramas del juego que se mantienen en cola antes de audout "
+-                     "(colchon; 10 = 53 ms, 6 hasta la build 105). Mas cola deja esperar al juego sin cortar la "
+-                     "salida, a cambio de latencia: nfsmw_audio_esperar_servidor_ms espera hasta 30 ms; se lee "
+-                     "al abrir el audio");
++                     "With audio_switch_bomba: game frames kept queued ahead of audout (cushion; "
++                     "10 = 53 ms, 6 up to build 105). A longer queue lets the game be late without cutting "
++                     "the output, at the cost of latency (nfsmw_audio_esperar_servidor_ms waits up to "
++                     "30 ms); read when audio is opened");
+ 
+ namespace rex::audio::nx {
+ 
+@@ -49,7 +58,11 @@ namespace {
  constexpr uint32_t kFramesPerBuffer = 4;
  constexpr uint32_t kBufferCount = 3;
  constexpr uint32_t kBufferSamples = kFramesPerBuffer * SwitchAudioDriver::kChannelSamples;
@@ -1100,7 +1980,7 @@ index 6a9dc8d..0055748 100644
  // audout wants page-aligned sample memory.
  constexpr uint32_t kBufferAllocBytes = (kBufferBytes + 0xFFF) & ~0xFFFu;
  
-@@ -62,12 +68,42 @@ constexpr u64 kWaitTimeoutNs = 100'000'000;
+@@ -62,12 +75,42 @@ constexpr u64 kWaitTimeoutNs = 100'000'000;
  // audio_switch_bomba: one frame (256 samples) every 5.333 ms with absolute deadlines. With this many
  // frames queued or fewer, another one is requested on each tick, and below the minimum one more is
  // requested to catch up (the system clock and the audio clock do not match exactly).
@@ -1144,16 +2024,41 @@ index 6a9dc8d..0055748 100644
  /* --- driver ------------------------------------------------------------------ */
  
  SwitchAudioDriver::SwitchAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
-@@ -109,15 +145,37 @@ bool SwitchAudioDriver::MixFrameInto(float* stereo_out, const StereoFold& fold,
+@@ -105,19 +148,73 @@ void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+ }
+ 
+ bool SwitchAudioDriver::MixFrameInto(float* stereo_out, const StereoFold& fold, float gain,
+-                                     bool release) {
++                                     bool release, bool is_music) {
++  const bool ocultar = !is_music && REXCVAR_GET(audio_switch_ocultar_faltas);
    float* frame;
    {
      std::lock_guard<std::mutex> guard(frames_mutex_);
 -    if (frames_queued_.empty()) {
--      return false;
 +    frame = frames_queued_.empty() ? nullptr : frames_queued_.front();
 +    if (frame) frames_queued_.pop();
 +  }
 +  if (!frame) {
++    if (ocultar && tem_ultimo_ && !faltou_ && repeticoes_ < 2) {
++      // Repeat the last real frame, attenuated (0.7, then 0.45). The first 64 samples crossfade from the last
++      // sample actually played, so there is no step at the seam.
++      const float g = repeticoes_ == 0 ? 0.7f : 0.45f;
++      for (uint32_t i = 0; i < kChannelSamples * 2; ++i) {
++        float v = ultimo_frame_[i] * g;
++        if (i / 2 < kAntiEstaloAmostras) {
++          const float t = float(i / 2 + 1) / float(kAntiEstaloAmostras);
++          v = ultima_amostra_[i & 1] * (1.0f - t) + v * t;
++        }
++        stereo_out[i] += v;
++      }
++      ultima_amostra_[0] = ultimo_frame_[kChannelSamples * 2 - 2] * g;
++      ultima_amostra_[1] = ultimo_frame_[kChannelSamples * 2 - 1] * g;
++      ++repeticoes_;
++      RexSwitchPerfAdd(36, 1);  // concealed repeats
+       return false;
+     }
+-    frame = frames_queued_.front();
+-    frames_queued_.pop();
 +    // The game did not deliver this client's frame in time. Dropping straight to silence in the middle of a
 +    // sound is a step that crackles ("blown speaker" with many sounds at stock clocks); fade the last sample out.
 +    if (!faltou_) {
@@ -1163,15 +2068,26 @@ index 6a9dc8d..0055748 100644
 +        stereo_out[2 * i + 1] += ultima_amostra_[1] * g;
 +      }
 +      faltou_ = true;
-     }
--    frame = frames_queued_.front();
--    frames_queued_.pop();
++    }
 +    ultima_amostra_[0] = ultima_amostra_[1] = 0.0f;
 +    return false;
    }
    std::array<float, kChannelSamples * 2> folded;
    conversion::sequential_6_BE_to_interleaved_2_LE(folded.data(), frame, kChannelSamples, fold,
                                                    gain);
++  if (ocultar) {
++    std::memcpy(ultimo_frame_.data(), folded.data(), sizeof(float) * folded.size());
++    tem_ultimo_ = true;
++  }
++  if (repeticoes_ > 0 && !faltou_) {
++    // Real frame after repeated ones: crossfade from the repeat's last sample into the new frame.
++    for (uint32_t i = 0; i < kAntiEstaloAmostras; ++i) {
++      const float t = float(i + 1) / float(kAntiEstaloAmostras);
++      folded[2 * i] = ultima_amostra_[0] * (1.0f - t) + folded[2 * i] * t;
++      folded[2 * i + 1] = ultima_amostra_[1] * (1.0f - t) + folded[2 * i + 1] * t;
++    }
++  }
++  repeticoes_ = 0;
 +  if (faltou_) {
 +    // Back after a gap: fade in instead of jumping from silence to the middle of the waveform.
 +    for (uint32_t i = 0; i < kAntiEstaloAmostras; ++i) {
@@ -1186,7 +2102,7 @@ index 6a9dc8d..0055748 100644
    for (size_t i = 0; i < folded.size(); ++i) {
      stereo_out[i] += folded[i];
    }
-@@ -157,6 +215,11 @@ struct SwitchAudioSystem::Output {
+@@ -157,6 +254,11 @@ struct SwitchAudioSystem::Output {
    std::array<AudioOutBuffer, kBufferCount> buffers{};
    std::array<s16*, kBufferCount> samples{};
    std::array<float, kBufferSamples * 2> mix{};
@@ -1198,7 +2114,7 @@ index 6a9dc8d..0055748 100644
  };
  
  std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
-@@ -171,7 +234,7 @@ SwitchAudioSystem::~SwitchAudioSystem() {
+@@ -171,7 +273,7 @@ SwitchAudioSystem::~SwitchAudioSystem() {
    StopOutput();
  }
  
@@ -1207,7 +2123,7 @@ index 6a9dc8d..0055748 100644
                                           rex::thread::Semaphore* semaphore,
                                           AudioDriver** out_driver) {
    assert_not_null(out_driver);
-@@ -181,10 +244,13 @@ X_STATUS SwitchAudioSystem::CreateDriver([[maybe_unused]] size_t index,
+@@ -181,10 +283,13 @@ X_STATUS SwitchAudioSystem::CreateDriver([[maybe_unused]] size_t index,
      return X_STATUS_UNSUCCESSFUL;
    }
    auto driver = new SwitchAudioDriver(memory_, semaphore);
@@ -1217,11 +2133,11 @@ index 6a9dc8d..0055748 100644
      drivers_.push_back(driver);
 +    if (music) music_driver_ = driver;
    }
-+  if (music) REXLOG_INFO("[B3 audio] musica no cliente {} a 48000 Hz, com relogio proprio", index);
++  if (music) REXLOG_INFO("[B3 audio] music on client {} at 48000 Hz, with its own clock", index);
    *out_driver = driver;
    return X_STATUS_SUCCESS;
  }
-@@ -194,6 +260,7 @@ void SwitchAudioSystem::DestroyDriver(AudioDriver* driver) {
+@@ -194,6 +299,7 @@ void SwitchAudioSystem::DestroyDriver(AudioDriver* driver) {
    auto switch_driver = static_cast<SwitchAudioDriver*>(driver);
    {
      std::lock_guard<std::mutex> guard(drivers_mutex_);
@@ -1229,7 +2145,16 @@ index 6a9dc8d..0055748 100644
      drivers_.erase(std::remove(drivers_.begin(), drivers_.end(), switch_driver), drivers_.end());
    }
    delete switch_driver;
-@@ -214,7 +281,7 @@ bool SwitchAudioSystem::StartOutput() {
+@@ -203,7 +309,7 @@ bool SwitchAudioSystem::StartOutput() {
+   auto output = std::make_unique<Output>();
+   output->pump = REXCVAR_GET(audio_switch_bomba);
+   output->tramas_en_cola = static_cast<size_t>(std::clamp(REXCVAR_GET(audio_switch_tramas_en_cola), 2, 32));
+-  REXLOG_INFO("SwitchAudioSystem: bomba de 187,5 Hz {}, {} tramas en cola", output->pump ? "activa" : "apagada",
++  REXLOG_INFO("SwitchAudioSystem: 187.5 Hz pump {}, {} frames queued", output->pump ? "on" : "off",
+               output->tramas_en_cola);
+ 
+   Result rc = audoutInitialize();
+@@ -214,7 +320,7 @@ bool SwitchAudioSystem::StartOutput() {
    output->audout_initialized = true;
    REXLOG_INFO("SwitchAudioSystem: audout {} Hz, {} channels, PCM format {}",
                audoutGetSampleRate(), audoutGetChannelCount(), int(audoutGetPcmFormat()));
@@ -1238,7 +2163,7 @@ index 6a9dc8d..0055748 100644
        audoutGetPcmFormat() != PcmFormat_Int16) {
      REXLOG_ERROR("SwitchAudioSystem: unexpected audout format");
      audoutExit();
-@@ -293,43 +360,75 @@ void SwitchAudioSystem::StopOutput() {
+@@ -293,43 +399,75 @@ void SwitchAudioSystem::StopOutput() {
  
  void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
    Output& output = *output_;
@@ -1254,7 +2179,7 @@ index 6a9dc8d..0055748 100644
 +  const float rate = active ? std::clamp(float(kBattleFrameNs) / float(frame_ns), min_rate, 1.0f) : 1.0f;
 +  if (active != output.battle_clock_active ||
 +      (active && armTicksToNs(now - output.last_tempo_report) >= 2'000'000'000ull)) {
-+    REXLOG_INFO("[B3 audio sync] combate={} quadros/s={:.1f} ritmo_efeitos={:.3f}", active,
++    REXLOG_INFO("[B3 audio sync] battle={} frames/s={:.1f} effects_rate={:.3f}", active,
 +                active ? 1'000'000'000.0 / double(frame_ns) : 0.0, rate);
 +    output.battle_clock_active = active;
 +    output.last_tempo_report = now;
@@ -1273,7 +2198,7 @@ index 6a9dc8d..0055748 100644
 -    for (uint32_t frame = 0; frame < kFramesPerBuffer; ++frame) {
 -      float* out = output.mix.data() + frame * SwitchAudioDriver::kChannelSamples * 2;
 +  const auto mix_frame = [&](SwitchAudioDriver& driver, float* out) {
-+    if (driver.MixFrameInto(out, fold, gain, !output.pump)) {
++    if (driver.MixFrameInto(out, fold, gain, !output.pump, &driver == music_driver_)) {
 +      ++frames_mixed;
 +    } else {
 +      ++frames_missing;
@@ -2040,6 +2965,399 @@ index 5cfbb36..e824cb2 100644
  
    assert_true(!(index & ~0x0000FFFF));
    *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
+diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+index 57fd161..cf90d01 100644
+--- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
++++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
+@@ -38,11 +38,196 @@
+ #include <rex/system/xtypes.h>
+ #include <rex/thread/atomic.h>
+ #include <rex/thread/mutex.h>
++#include <rex/cvar.h>
++#include <rex/platform.h>
++
++#if REX_PLATFORM_SWITCH
++#include <mutex>
++#include <string_view>
++
++#include "../../core/threading_switch.h"
++
++extern "C" void RexSwitchPerfAdd(unsigned id, unsigned long long value);
++#endif
++
++REXCVAR_DEFINE_BOOL(audio_switch_prioridad_mezclador, true, "Audio",
++                    "Switch: detect the game threads that mix the audio (the ones waiting on the event "
++                    "an Audio Worker signals for every audio frame) and raise them from 0x3B to 0x2D, "
++                    "above the spinning game threads, so the audio callback does not miss frames at "
++                    "1020 MHz (crackle at the end of explosions and magic); at most 2 threads; with "
++                    "audio_parallel_client_callbacks each one also prefers its own core (1 and 2); "
++                    "false = every game thread at 0x3B, as before");
++REXCVAR_DECLARE(bool, audio_parallel_client_callbacks);  // audio_system.cpp
+ 
+ namespace rex::kernel::xboxkrnl {
+ using namespace rex::system;
+ using rex::runtime::current_ppc_context;
+ 
++#if REX_PLATFORM_SWITCH
++namespace {
++
++// --- Guest audio mixer boost (Switch) ----------------------------------------
++//
++// Why: the host "Audio Worker" (0x2B) runs the guest render callback twice per
++// 5.33 ms output period (two render clients, 256 samples at 48 kHz; with
++// audio_parallel_client_callbacks each client has its own worker, "Audio Worker"
++// and "Audio Worker 1", and the two callbacks overlap). That guest
++// callback (sub_822A9968) KeSetEvent()s a guest mixer thread, waits for it with
++// KeWaitForMultipleObjects and then submits the frame. On the console at
++// 1020 MHz the callback took 2.65-2.87 ms on average (5.3-5.7 ms per period,
++// over budget: 100-300 missing frames per 10 s, audible crackle at the tail of
++// explosions/magic), at 1428 MHz 2.26 ms with no misses - yet the Audio Worker
++// itself used ~2.7 % CPU. The time is spent waiting for the guest mixer, which
++// runs at REX_SWITCH_PRIO_GUEST (0x3B, time-sliced) and shares the 3 cores with
++// "Main XThread" (99 %, spin-waits) and another guest thread at 50-58 %.
++//
++// The mixer thread is a plain guest thread whose name/handle changes every run,
++// so it is detected here: events signalled by the Audio Worker are remembered,
++// and a guest thread that keeps waiting on one of them is the mixer. It is
++// raised to REX_SWITCH_PRIO_AUDIO_GUEST (0x2D): above the spinners at 0x3B so
++// it preempts them as soon as the Audio Worker wakes it, below the presenter
++// (0x2C) and audio/XMA (0x2B). 0x2D is inside the application range already
++// used by the 0x2B/0x2C host threads.
++//
++// Cores: every thread starts with the process default core as its preferred one,
++// and Horizon only migrates a ready thread to an idle core, not to a core busy
++// with a lower-priority spinner. Two mixers at 0x2D on the same preferred core
++// would then still run one after the other. With audio_parallel_client_callbacks
++// the first boosted mixer prefers core 1 and the second core 2 (preferred core
++// only, the mask is kept, so the kernel can still move them: no starvation risk).
++//
++// Risk: 0x2D is cooperative on Horizon (no time slicing), so a boosted thread
++// that spin-waits instead of blocking would keep its core from every 0x3B
++// thread. The mixer blocks on its event between frames, which is what makes
++// this safe; as guards, a thread is only boosted after kMinWaitsBeforeBoost
++// waits on an Audio Worker event, the main thread and host threads are never
++// boosted, at most kMaxBoostedThreads are, and the cvar turns it all off.
++// (No spinner detection is done: if a boosted thread ever shows ~100 % CPU in
++// rex_perfil.log, disable audio_switch_prioridad_mezclador.)
++constexpr int REX_SWITCH_PRIO_AUDIO_GUEST = 0x2D;
++static_assert(REX_SWITCH_PRIO_AUDIO_GUEST > REX_SWITCH_PRIO_PRESENT &&
++                  REX_SWITCH_PRIO_AUDIO_GUEST < REX_SWITCH_PRIO_GUEST,
++              "guest audio mixer must sit between the presenter and the guest band");
++constexpr size_t kMaxAudioEvents = 4;
++constexpr unsigned kMaxBoostedThreads = 2;
++constexpr uint32_t kMinWaitsBeforeBoost = 16;
++constexpr unsigned kPerfCounterBoostedThreads = 37;  // switch_perf.cpp, absolute count
++
++std::atomic<XObject*> g_audio_events[kMaxAudioEvents];
++std::atomic<uint32_t> g_audio_event_count{0};
++std::atomic<unsigned> g_boosted_threads{0};
++std::mutex g_audio_mixer_mutex;
++
++// Per host thread: -1 not checked yet, 0 no, 1 yes. The Audio Workers are the
++// XHostThreads named "Audio Worker" / "Audio Worker N" by AudioSystem::CreateWorker
++// (set_name appends the handle, so the prefix is compared, as SwitchPriorityFor
++// does). Thread-local cache, so several workers are fine.
++thread_local int8_t t_is_audio_worker = -1;
++// Per thread mixer state: 0 candidate, 1 boosted, 2 never (host/main/failed/disabled).
++thread_local uint8_t t_mixer_state = 0;
++thread_local uint32_t t_mixer_waits = 0;
++
++bool CurrentThreadIsAudioWorker() {
++  if (t_is_audio_worker < 0) {
++    XThread* cur = XThread::GetCurrentThread();
++    bool yes = false;
++    if (cur && !cur->is_guest_thread() && cur->thread()) {
++      yes = std::string_view(cur->thread()->name()).starts_with("Audio Worker");
++    }
++    t_is_audio_worker = yes ? 1 : 0;
++  }
++  return t_is_audio_worker == 1;
++}
++
++bool IsAudioEvent(XObject* object) {
++  const uint32_t n = std::min<uint32_t>(g_audio_event_count.load(std::memory_order_acquire),
++                                        kMaxAudioEvents);
++  for (uint32_t i = 0; i < n; ++i) {
++    if (g_audio_events[i].load(std::memory_order_relaxed) == object) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// Called from the set/pulse event shims.
++void NoteEventSignal(XObject* object) {
++  if (!object || g_audio_event_count.load(std::memory_order_relaxed) >= kMaxAudioEvents) {
++    return;
++  }
++  if (!CurrentThreadIsAudioWorker() || IsAudioEvent(object)) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(g_audio_mixer_mutex);
++  const uint32_t n = g_audio_event_count.load(std::memory_order_relaxed);
++  if (n >= kMaxAudioEvents || IsAudioEvent(object)) {
++    return;
++  }
++  g_audio_events[n].store(object, std::memory_order_relaxed);
++  g_audio_event_count.store(n + 1, std::memory_order_release);
++  REXKRNL_INFO("[B3 audio] event signalled by an Audio Worker registered ({}/{}): handle {:08X}",
++               n + 1, kMaxAudioEvents, object->handle());
++}
++
++// Called from the wait shims, before blocking, so the wake-up already runs at
++// the raised priority.
++void NoteGuestWait(XObject* const* objects, uint32_t count) {
++  if (t_mixer_state != 0 || g_audio_event_count.load(std::memory_order_relaxed) == 0) {
++    return;
++  }
++  bool hit = false;
++  for (uint32_t i = 0; i < count && !hit; ++i) {
++    hit = IsAudioEvent(objects[i]);
++  }
++  if (!hit) {
++    return;
++  }
++  XThread* cur = XThread::GetCurrentThread();
++  if (!cur || !cur->is_guest_thread() || cur->main_thread() || CurrentThreadIsAudioWorker() ||
++      !REXCVAR_GET(audio_switch_prioridad_mezclador)) {
++    t_mixer_state = 2;
++    return;
++  }
++  if (++t_mixer_waits < kMinWaitsBeforeBoost) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(g_audio_mixer_mutex);
++  if (g_boosted_threads.load(std::memory_order_relaxed) >= kMaxBoostedThreads) {
++    t_mixer_state = 2;
++    return;
++  }
++  const std::string name = cur->thread() ? cur->thread()->name() : std::string("?");
++  if (!RexSwitchSetCurrentThreadPriorityOk(REX_SWITCH_PRIO_AUDIO_GUEST)) {
++    t_mixer_state = 2;
++    REXKRNL_WARN("[B3 audio] game mixer thread detected: {} ({:08X}), but the kernel refused "
++                 "priority 0x{:X}; it stays at 0x{:X}",
++                 name, cur->handle(), REX_SWITCH_PRIO_AUDIO_GUEST, REX_SWITCH_PRIO_GUEST);
++    return;
++  }
++  t_mixer_state = 1;
++  const unsigned boost_index = g_boosted_threads.fetch_add(1, std::memory_order_relaxed);
++  RexSwitchPerfAdd(kPerfCounterBoostedThreads, 1);
++  // Distinct preferred cores (see "Cores" above): 1 for the first mixer, 2 for the second.
++  int core = -1;
++  if (REXCVAR_GET(audio_parallel_client_callbacks)) {
++    core = int(1 + boost_index);
++    if (!RexSwitchSetCurrentThreadCore(core)) {
++      core = -1;
++    }
++  }
++  REXKRNL_INFO("[B3 audio] game mixer thread detected: {} ({:08X}), priority 0x{:X} -> 0x{:X}, "
++               "preferred core {}",
++               name, cur->handle(), REX_SWITCH_PRIO_GUEST, REX_SWITCH_PRIO_AUDIO_GUEST, core);
++}
++
++}  // namespace
++#define REX_NOTE_EVENT_SIGNAL(obj) NoteEventSignal(obj)
++#define REX_NOTE_GUEST_WAIT(objs, n) NoteGuestWait(objs, n)
++#else
++#define REX_NOTE_EVENT_SIGNAL(obj) ((void)0)
++#define REX_NOTE_GUEST_WAIT(objs, n) ((void)0)
++#endif
++
+ // r13 + 0x100: pointer to thread local state
+ // Thread local state:
+ //   0x058: kernel time
+@@ -469,6 +654,7 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
+     return 0;
+   }
+ 
++  REX_NOTE_EVENT_SIGNAL(ev.get());
+   return ev->Set(increment, !!wait);
+ }
+ 
+@@ -483,6 +669,7 @@ u32 KePulseEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
+     return 0;
+   }
+ 
++  REX_NOTE_EVENT_SIGNAL(ev.get());
+   return ev->Pulse(increment, !!wait);
+ }
+ 
+@@ -532,6 +719,7 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
+ 
+   auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
+   if (ev) {
++    REX_NOTE_EVENT_SIGNAL(ev.get());
+     int32_t was_signalled = ev->Set(0, false);
+     if (previous_state_ptr) {
+       *previous_state_ptr = static_cast<uint32_t>(was_signalled);
+@@ -827,6 +1015,10 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_
+     return X_STATUS_ABANDONED_WAIT_0;
+   }
+ 
++  {
++    XObject* const waited = object.get();
++    REX_NOTE_GUEST_WAIT(&waited, 1);
++  }
+   X_STATUS result = object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
+ 
+   if (alertable && result == X_STATUS_USER_APC) {
+@@ -857,6 +1049,10 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
+   auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
+   if (object) {
+     uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
++    {
++      XObject* const waited = object.get();
++      REX_NOTE_GUEST_WAIT(&waited, 1);
++    }
+     result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
+     if (alertable && result == X_STATUS_USER_APC) {
+       XThread::GetCurrentThread()->DeliverAPCs();
+@@ -885,6 +1081,7 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
+   }
+ 
+   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
++  REX_NOTE_GUEST_WAIT(reinterpret_cast<XObject* const*>(objects.data()), uint32_t(objects.size()));
+   X_STATUS result = XObject::WaitMultiple(
+       uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
+       processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
+@@ -909,6 +1106,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
+     objects.push_back(std::move(object));
+   }
+ 
++  REX_NOTE_GUEST_WAIT(reinterpret_cast<XObject* const*>(objects.data()), uint32_t(objects.size()));
+   auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects.data()), wait_type,
+                                       6, wait_mode, alertable, timeout_ptr);
+   if (alertable && result == X_STATUS_USER_APC) {
+diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
+index d358f39..f335596 100644
+--- a/src/system/xobject.cpp
++++ b/src/system/xobject.cpp
+@@ -9,6 +9,7 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/chrono/clock.h>
+@@ -29,6 +30,36 @@
+ 
+ namespace rex::system {
+ 
++namespace {
++thread_local std::mutex* t_mutex_released_during_waits = nullptr;
++
++// Releases the calling thread's SetMutexReleasedDuringGuestWaits mutex for the duration of
++// one blocking host wait.
++class ScopedGuestWaitUnlock {
++ public:
++  ScopedGuestWaitUnlock() : mutex_(t_mutex_released_during_waits) {
++    if (mutex_) {
++      mutex_->unlock();
++    }
++  }
++  ~ScopedGuestWaitUnlock() {
++    if (mutex_) {
++      mutex_->lock();
++    }
++  }
++  ScopedGuestWaitUnlock(const ScopedGuestWaitUnlock&) = delete;
++  ScopedGuestWaitUnlock& operator=(const ScopedGuestWaitUnlock&) = delete;
++
++ private:
++  std::mutex* mutex_;
++};
++}  // namespace
++
++void SetMutexReleasedDuringGuestWaits(std::mutex* mutex) {
++  t_mutex_released_during_waits = mutex;
++}
++
++
+ XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
+   handles_.reserve(10);
+ }
+@@ -213,7 +244,11 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+                                 : std::chrono::milliseconds::max();
+ 
+   XThread::CheckTitleTermination();
+-  auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
++  rex::thread::WaitResult result;
++  {
++    ScopedGuestWaitUnlock unlock;
++    result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
++  }
+   XThread::CheckTitleTermination();
+   switch (result) {
+     case rex::thread::WaitResult::kSuccess:
+@@ -239,9 +274,13 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
+                                       TimeoutTicksToMs(*opt_timeout)))
+                                 : std::chrono::milliseconds::max();
+ 
+-  auto result =
+-      rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
+-                                 alertable ? true : false, timeout_ms);
++  rex::thread::WaitResult result;
++  {
++    ScopedGuestWaitUnlock unlock;
++    result =
++        rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
++                                   alertable ? true : false, timeout_ms);
++  }
+   switch (result) {
+     case rex::thread::WaitResult::kSuccess:
+       wait_object->WaitCallback();
+@@ -274,8 +313,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+ 
+   XThread::CheckTitleTermination();
+   if (wait_type) {
+-    auto result =
+-        rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
++    std::pair<rex::thread::WaitResult, size_t> result;
++    {
++      ScopedGuestWaitUnlock unlock;
++      result = rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);
++    }
+     XThread::CheckTitleTermination();
+     switch (result.first) {
+       case rex::thread::WaitResult::kSuccess:
+@@ -295,8 +337,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+         return X_STATUS_UNSUCCESSFUL;
+     }
+   } else {
+-    auto result =
+-        rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
++    rex::thread::WaitResult result;
++    {
++      ScopedGuestWaitUnlock unlock;
++      result = rex::thread::WaitAll(std::move(wait_handles), alertable ? true : false, timeout_ms);
++    }
+     XThread::CheckTitleTermination();
+     switch (result) {
+       case rex::thread::WaitResult::kSuccess:
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+index af02bc0..7591647 100644
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -894,9 +894,18 @@ void XThread::SetPriority(int32_t increment) {
+   } else {
+     target_priority = rex::thread::ThreadPriority::kNormal;
+   }
++#if !REX_PLATFORM_SWITCH
+   if (!REXCVAR_GET(ignore_thread_priorities)) {
+     thread_->set_priority(target_priority);
+   }
++#else
++  // On Switch the host priority comes only from SwitchPriorityFor (plus the guest
++  // audio mixer boost in xboxkrnl_threading.cpp). The rex::thread::ThreadPriority
++  // values above (-2..2) are not Horizon priorities and would reach
++  // svcSetThreadPriority as invalid numbers, and honoring the guest here could
++  // also undo the mixer's 0x2D boost, so guest requests only update the KTHREAD.
++  (void)target_priority;
++#endif
+ }
+ 
+ void XThread::SetAffinity(uint32_t affinity) {
 diff --git a/src/ui/deko3d/glsl.cpp b/src/ui/deko3d/glsl.cpp
 index aed5d72..eba3afb 100644
 --- a/src/ui/deko3d/glsl.cpp
@@ -2099,19 +3417,108 @@ index aed5d72..eba3afb 100644
          const uint32_t ubicacion = compilador.get_decoration(s.id, spv::DecorationLocation);
          if (ubicacion >= 32) {
 diff --git a/src/ui/deko3d/nucleo.cpp b/src/ui/deko3d/nucleo.cpp
-index dba3808..4f9d366 100644
+index dba3808..a847d84 100644
 --- a/src/ui/deko3d/nucleo.cpp
 +++ b/src/ui/deko3d/nucleo.cpp
-@@ -10,6 +10,8 @@
+@@ -4,12 +4,21 @@
+ 
+ #include <switch.h>
+ 
++#include <malloc.h>
++#include <unistd.h>
++
+ #include <algorithm>
+ #include <cstdarg>
+ #include <cstdio>
  #include <cstdlib>
  #include <cstring>
  
++#include "rex/ui/switch_saltynx.h"
++
 +extern "C" void RexSwitchPerfResolution(unsigned ancho, unsigned alto);
++// libnx's newlib glue: the end of the heap sbrk hands out (MemoriaLibreHeap).
++extern "C" char* fake_heap_end;
 +
  namespace rex::deko3d {
  namespace {
  
-@@ -373,9 +375,10 @@ DkCmdList Nucleo::CerrarPrevios() {
+@@ -29,7 +38,21 @@ constexpr uint32_t kHolguraComandos = 256;
+ 
+ // deko3d's messages. Only the debug library (libdeko3dd) calls this, for every check it makes: warnings with
+ // DkResult_Success, and errors, after which it traps. The error is logged readably and ends the process here.
++// The trial of this thread (AbrirEnsayo): errors seen and the first one's description.
++thread_local bool t_ensayo = false;
++thread_local uint32_t t_ensayo_errores = 0;
++thread_local char t_ensayo_motivo[160] = "";
++
+ void ManejarMensaje(void*, const char* contexto, DkResult resultado, const char* mensaje) {
++  if (resultado != DkResult_Success && t_ensayo) {
++    if (t_ensayo_errores++ == 0) {
++      std::snprintf(t_ensayo_motivo, sizeof(t_ensayo_motivo), "erro de deko3d em %s: resultado %d%s%s",
++                    contexto ? contexto : "?", int(resultado), mensaje ? ": " : "", mensaje ? mensaje : "");
++    }
++    Registro("[dk] erro de deko3d tolerado no ensaio: %s: resultado %d: %s", contexto ? contexto : "?",
++             int(resultado), mensaje ? mensaje : "");
++    return;
++  }
+   if (resultado != DkResult_Success) {
+     Fatal("[dk] error de deko3d en %s: resultado %d: %s", contexto ? contexto : "?", int(resultado),
+           mensaje ? mensaje : "");
+@@ -88,6 +111,40 @@ void Fatal(const char* formato, ...) {
+   std::abort();
+ }
+ 
++void AbrirEnsayo() {
++  t_ensayo = true;
++  t_ensayo_errores = 0;
++  t_ensayo_motivo[0] = '\0';
++}
++
++bool EnsayoConError(char* motivo, size_t bytes) {
++  if (t_ensayo_errores && motivo && bytes) {
++    std::snprintf(motivo, bytes, "%s", t_ensayo_motivo);
++  }
++  return t_ensayo_errores != 0;
++}
++
++bool CerrarEnsayo(char* motivo, size_t bytes) {
++  const bool error = EnsayoConError(motivo, bytes);
++  t_ensayo = false;
++  t_ensayo_errores = 0;
++  return !error;
++}
++
++bool EnSobremesa() {
++  return rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console);
++}
++
++uint64_t MemoriaLibreHeap() {
++  const struct mallinfo mi = mallinfo();
++  const char* tope = static_cast<const char*>(sbrk(0));
++  uint64_t sin_usar = 0;
++  if (fake_heap_end && tope && tope != reinterpret_cast<const char*>(-1) && fake_heap_end > tope) {
++    sin_usar = uint64_t(fake_heap_end - tope);
++  }
++  return sin_usar + uint64_t(mi.fordblks);
++}
++
+ // ---- Device and queue
+ 
+ Dispositivo::~Dispositivo() { Destruir(); }
+@@ -192,8 +249,11 @@ int Dispositivo::Adquirir(DkSwapchain cadena) {
+   // The acquire may wait for the window to give an image back: without the queue lock, so the ring thread can keep
+   // submitting; only the GPU wait for that image goes into the queue.
+   int imagen = 0;
+-  DkFence valla;
++  DkFence valla{};
+   dkSwapchainAcquireImage(cadena, &imagen, &valla);
++  if (EnsayoConError()) {
++    return -1;  // inside a trial (the experimental 1440 output): the fence is not valid, nothing waits for it
++  }
+   std::lock_guard<std::mutex> cerrojo(candado_);
+   ComprobarCola("esperar una imagen de la cadena");
+   dkQueueWaitFence(cola_, &valla);
+@@ -373,9 +433,10 @@ DkCmdList Nucleo::CerrarPrevios() {
      return 0;
    }
    // Uploads (copy engine), descriptor writes and code are done and visible before comandos() runs
@@ -2123,19 +3530,44 @@ index dba3808..4f9d366 100644
    return dkCmdBufFinishList(previos_);
  }
  
-@@ -623,6 +626,7 @@ void Presentacion::Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint3
+@@ -599,7 +660,7 @@ void ArreglarTamanoDeTesela(DkImageLayoutMaker& m, uint32_t filas) {
+ 
+ Presentacion::~Presentacion() { Destruir(); }
+ 
+-void Presentacion::Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint32_t intervalo, NWindow* ventana) {
++bool Presentacion::Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint32_t intervalo, NWindow* ventana) {
+   Destruir();
+   disp_ = &disp;
+   ancho_ = ancho;
+@@ -617,13 +678,23 @@ void Presentacion::Crear(Dispositivo& disp, uint32_t ancho, uint32_t alto, uint3
+   Registro("[dk] creando la cadena de presentacion: %u imagenes RGBA8 de %ux%u", kImagenes, ancho, alto);
+   memoria_ = disp.CrearBloque(kImagenes * bytes, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+                               "imagenes de la cadena de presentacion");
++  if (!memoria_) {
++    return false;  // only inside a trial (AbrirEnsayo); otherwise the failure ended the process
++  }
+   const DkImage* imagenes[kImagenes];
+   for (uint32_t i = 0; i < kImagenes; ++i) {
+     dkImageInitialize(&imagenes_[i], &disposicion, memoria_, i * bytes);
      imagenes[i] = &imagenes_[i];
    }
    cadena_ = disp.CrearCadena(ventana, imagenes, kImagenes);
++  if (!cadena_) {
++    disp.DestruirBloque(memoria_);
++    memoria_ = nullptr;
++    return false;
++  }
 +  RexSwitchPerfResolution(ancho, alto);  // what the system monitor (SaltyNX block) shows as RES; was never updated
    dkSwapchainSetSwapInterval(cadena_, intervalo);
++  return true;
  }
  
+ void Presentacion::Destruir() {
 diff --git a/src/ui/deko3d/presentador.cpp b/src/ui/deko3d/presentador.cpp
-index cdf084b..4996956 100644
+index cdf084b..c701c70 100644
 --- a/src/ui/deko3d/presentador.cpp
 +++ b/src/ui/deko3d/presentador.cpp
-@@ -2,17 +2,37 @@
+@@ -2,17 +2,41 @@
  
  #include <rex/ui/deko3d/presentador.h>
  
@@ -2148,18 +3580,22 @@ index cdf084b..4996956 100644
 +                    "proximo vblank em vez de esperar o proximo multiplo (sem 33 -> 67 ms). Ao vivo.");
  #include <rex/logging.h>
  #include <rex/logging/api.h>
++#include <rex/ui/image_decode.h>
 +#include <rex/ui/superposicion.h>
  #include <rex/ui/surface_switch.h>
++#include <rex/ui/window_switch.h>
  
  #include <switch.h>
  
  #include <algorithm>
++#include <atomic>
 +#include <chrono>
  #include <cstddef>
 +#include <cstdio>
  #include <cstring>
 +#include <mutex>
 +#include <string>
++#include <string_view>
  #include <vector>
  
 +// Defined with the input driver, which toggles it with ZL + ZR + Up (switch_input_driver.cpp).
@@ -2173,7 +3609,7 @@ index cdf084b..4996956 100644
  namespace rex::deko3d {
  namespace {
  
-@@ -120,6 +140,159 @@ class ContextoUIDeko3d final : public rex::ui::UIDrawContext {
+@@ -120,6 +144,334 @@ class ContextoUIDeko3d final : public rex::ui::UIDrawContext {
    DkImage& destino;
  };
  
@@ -2241,11 +3677,20 @@ index cdf084b..4996956 100644
 +constexpr uint32_t kMenuAncho = (kMenuColumnas + 2) * 6;  // a character of margin each side
 +constexpr uint32_t kMenuAlto = (kMenuFilasTotal + 1) * 9;  // half a line of margin above and below
 +constexpr uint32_t kLetreiroCuadros = 6;                   // presented frames per character of scroll
++// 0.1.47: the image holds the box at twice that resolution (the same size on screen), rasterized on the CPU: a dot of
++// the normal font is 2x2 texels, one of the small font ('\x01') 1x1, and icons get 16x16 or 32x32 texels.
++constexpr uint32_t kMenuHd = 2;
++constexpr uint32_t kMenuAnchoHd = kMenuAncho * kMenuHd;
++constexpr uint32_t kMenuAltoHd = kMenuAlto * kMenuHd;
++constexpr uint32_t kMenuCeldaHd = 6 * kMenuHd;  // a character's advance
++constexpr uint32_t kMenuLineaHd = 9 * kMenuHd;  // a line's
 +
 +struct Superposicion {
 +  std::mutex candado;
 +  std::vector<std::string> lineas;
++  std::vector<rex::ui::IconoEnLinea> iconos;
 +  std::vector<std::string> aviso;
++  std::vector<rex::ui::IconoEnLinea> iconos_aviso;
 +  std::string letreiro;  // the marquee line under the menu's lines ("" = none)
 +  std::chrono::steady_clock::time_point vence_aviso{};
 +  uint64_t version = 0;
@@ -2304,36 +3749,202 @@ index cdf084b..4996956 100644
 +  }
 +}
 +
-+// The lines as RGBA8 texels, with a character of margin.
-+void RasterizarMenu(const std::vector<std::string>& lineas, uint8_t* destino) {
-+  for (uint32_t i = 0; i < kMenuAncho * kMenuAlto; ++i) {
-+    uint8_t* texel = destino + i * 4;
-+    texel[0] = 10;
-+    texel[1] = 25;
-+    texel[2] = 13;
-+    texel[3] = 0xFF;
++struct ColorMenu {
++  uint8_t r, g, b;
++};
++constexpr ColorMenu kMenuFondo = {10, 25, 13};
++constexpr ColorMenu kMenuBlanco = {0xFF, 0xFF, 0xFF};
++constexpr ColorMenu kMenuVerde = {0xA5, 0xFF, 0x86};     // the title and the selected line
++constexpr ColorMenu kMenuApagado = {0x78, 0x80, 0x78};   // after '\x02': a locked achievement
++constexpr ColorMenu kMenuPequeno = {0xB4, 0xBC, 0xB4};   // the small font ('\x01')
++
++// Rows [y0, y0 + alto) of the box at the double resolution, kMenuAnchoHd texels each; writes outside are dropped.
++struct LienzoMenu {
++  uint8_t* texeles;
++  uint32_t y0, alto;
++  uint8_t* Texel(uint32_t x, uint32_t y) const {
++    if (x >= kMenuAnchoHd || y < y0 || y >= y0 + alto) return nullptr;
++    return texeles + (size_t(y - y0) * kMenuAnchoHd + x) * 4;
 +  }
-+  for (uint32_t l = 0; l < kMenuFilasTotal && l < lineas.size(); ++l) {
-+    const bool destacada = l == 0 || (l < kMenuFilas && lineas[l].starts_with('>'));
-+    for (uint32_t i = 0; i < kMenuColumnas && i < lineas[l].size(); ++i) {
-+      const uint8_t* glifo = GlifoMenu(lineas[l][i]);
-+      for (uint32_t fila = 0; fila < 7; ++fila) {
-+        for (uint32_t columna = 0; columna < 5; ++columna) {
-+          if (!((glifo[fila] >> (4 - columna)) & 1)) continue;
-+          uint8_t* t = destino + ((l * 9 + 5 + fila) * kMenuAncho + (i + 1) * 6 + columna) * 4;
-+          t[0] = destacada ? 0xA5 : 0xFF;
-+          t[1] = 0xFF;
-+          t[2] = destacada ? 0x86 : 0xFF;
++  void Fondo() const {
++    for (size_t i = 0; i < size_t(kMenuAnchoHd) * alto; ++i) {
++      uint8_t* t = texeles + i * 4;
++      t[0] = kMenuFondo.r;
++      t[1] = kMenuFondo.g;
++      t[2] = kMenuFondo.b;
++      t[3] = 0xFF;
++    }
++  }
++};
++
++// A glyph whose top left is (x, y), `punto` texels per dot.
++void PintarGlifoMenu(const LienzoMenu& l, char c, uint32_t x, uint32_t y, uint32_t punto, ColorMenu color) {
++  const uint8_t* glifo = GlifoMenu(c);
++  for (uint32_t fila = 0; fila < 7; ++fila) {
++    for (uint32_t columna = 0; columna < 5; ++columna) {
++      if (!((glifo[fila] >> (4 - columna)) & 1)) continue;
++      for (uint32_t dy = 0; dy < punto; ++dy) {
++        for (uint32_t dx = 0; dx < punto; ++dx) {
++          if (uint8_t* t = l.Texel(x + columna * punto + dx, y + fila * punto + dy)) {
++            t[0] = color.r;
++            t[1] = color.g;
++            t[2] = color.b;
++          }
 +        }
 +      }
 +    }
 +  }
 +}
 +
++// A small run: up to two rows of the half-size font from (x0, y0), each broken at '\n' or at the last space that fits.
++// Returns the right edge of what it drew (x0 when nothing).
++uint32_t PintarPequenoMenu(const LienzoMenu& l, std::string_view texto, uint32_t x0, uint32_t y0, ColorMenu color) {
++  if (x0 + kMenuCeldaHd >= kMenuAnchoHd) return x0;
++  const size_t capacidad = (kMenuAnchoHd - kMenuCeldaHd - x0) / 6;
++  uint32_t derecha = x0;
++  for (uint32_t fila = 0; fila < 2 && !texto.empty(); ++fila) {
++    while (!texto.empty() && (texto.front() == ' ' || texto.front() == '\n')) texto.remove_prefix(1);
++    size_t corte = std::min(texto.find('\n'), texto.size());
++    size_t siguiente = corte + 1;  // past the '\n'
++    if (corte > capacidad) {
++      const size_t espacio = texto.substr(0, capacidad + 1).rfind(' ');
++      corte = espacio != std::string_view::npos && espacio > 0 ? espacio : capacidad;
++      siguiente = corte;
++    }
++    for (size_t i = 0; i < corte; ++i) {
++      PintarGlifoMenu(l, texto[i], x0 + uint32_t(i) * 6, y0 + fila * 9, 1, color);
++    }
++    if (corte) derecha = std::max(derecha, x0 + uint32_t(corte) * 6);
++    texto.remove_prefix(std::min(siguiente, texto.size()));
++  }
++  return derecha;
++}
++
++// Line n: the normal font, '\x02' (blank; dim from there on) and '\x01' (the rest in the small font). Returns the right
++// edge of what it holds.
++uint32_t PintarLineaMenu(const LienzoMenu& l, const std::string& linea, uint32_t n) {
++  const bool destacada = n == 0 || (n < kMenuFilas && linea.starts_with('>'));
++  ColorMenu color = destacada ? kMenuVerde : kMenuBlanco;
++  bool apagada = false;
++  uint32_t derecha = 0;
++  for (uint32_t i = 0; i < kMenuColumnas && i < linea.size(); ++i) {
++    const uint32_t x = (i + 1) * kMenuCeldaHd;
++    if (linea[i] == '\x02') {
++      color = kMenuApagado;
++      apagada = true;
++      continue;
++    }
++    if (linea[i] == '\x03') {
++      // 0.1.50, the big font: dots of 2x the normal ones, a character two columns wide; the next line must be empty.
++      for (size_t k = i + 1; k < linea.size(); ++k) {
++        const uint32_t xg = x + uint32_t(k - i - 1) * 2 * kMenuCeldaHd;
++        if (xg + 2 * kMenuCeldaHd > kMenuAnchoHd - kMenuCeldaHd) break;
++        if (linea[k] != ' ') derecha = std::max(derecha, xg + 2 * kMenuCeldaHd);
++        PintarGlifoMenu(l, linea[k], xg, n * kMenuLineaHd + 4, 2 * kMenuHd, color);
++      }
++      break;
++    }
++    if (linea[i] == '\x01') {
++      derecha = std::max(derecha, PintarPequenoMenu(l, std::string_view(linea).substr(i + 1), x,
++                                                    n * kMenuLineaHd + 9, apagada ? kMenuApagado : kMenuPequeno));
++      break;
++    }
++    if (linea[i] != ' ') derecha = std::max(derecha, x + kMenuCeldaHd);
++    PintarGlifoMenu(l, linea[i], x, n * kMenuLineaHd + 5 * kMenuHd, kMenuHd, color);
++  }
++  return derecha;
++}
++
++// An icon box-filtered to 16x16 or 32x32 and blended over the box (straight alpha). Returns its right edge (0: none).
++uint32_t PintarIconoMenu(const LienzoMenu& l, const rex::ui::IconoEnLinea& e) {
++  const rex::ui::IconoSuperposicion* icono = e.icono.get();
++  if (!icono || !icono->ancho || !icono->alto || icono->rgba.size() < size_t(icono->ancho) * icono->alto * 4) return 0;
++  const uint32_t lado = e.filas >= 2 ? std::min<uint32_t>(e.filas, 6) * 16 : 16;  // 0.1.50: up to 96 over 6 lines
++  const uint32_t x0 = (e.columna + 1) * kMenuCeldaHd + 2;
++  const uint32_t y0 = e.linea * kMenuLineaHd + (e.filas >= 2 ? 10 : 9);
++  const bool ampliar = icono->ancho < lado || icono->alto < lado;
++  for (uint32_t dy = 0; dy < lado; ++dy) {
++    if (ampliar) {
++      // A smaller source than the box: bilinear on premultiplied colour (non-integer scales stay smooth).
++      const float fy = std::clamp((float(dy) + 0.5f) * float(icono->alto) / float(lado) - 0.5f, 0.0f,
++                                  float(icono->alto - 1));
++      const uint32_t iy = uint32_t(fy), iy2 = std::min(iy + 1, icono->alto - 1);
++      const float wy = fy - float(iy);
++      for (uint32_t dx = 0; dx < lado; ++dx) {
++        uint8_t* t = l.Texel(x0 + dx, y0 + dy);
++        if (!t) continue;
++        const float fx = std::clamp((float(dx) + 0.5f) * float(icono->ancho) / float(lado) - 0.5f, 0.0f,
++                                    float(icono->ancho - 1));
++        const uint32_t ix = uint32_t(fx), ix2 = std::min(ix + 1, icono->ancho - 1);
++        const float wx = fx - float(ix);
++        float c[4] = {0, 0, 0, 0};  // premultiplied r, g, b (0-255) and alpha (0-1)
++        const uint32_t xs[4] = {ix, ix2, ix, ix2}, ys[4] = {iy, iy, iy2, iy2};
++        const float ws[4] = {(1 - wx) * (1 - wy), wx * (1 - wy), (1 - wx) * wy, wx * wy};
++        for (int k = 0; k < 4; ++k) {
++          const uint8_t* p = icono->rgba.data() + (size_t(ys[k]) * icono->ancho + xs[k]) * 4;
++          const float a = float(p[3]) / 255.0f;
++          c[0] += ws[k] * float(p[0]) * a;
++          c[1] += ws[k] * float(p[1]) * a;
++          c[2] += ws[k] * float(p[2]) * a;
++          c[3] += ws[k] * a;
++        }
++        if (c[3] <= 0.0f) continue;
++        if (e.gris) c[0] = c[1] = c[2] = (0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2]) * 0.35f;
++        t[0] = uint8_t(std::min(255.0f, c[0] + float(t[0]) * (1 - c[3])));
++        t[1] = uint8_t(std::min(255.0f, c[1] + float(t[1]) * (1 - c[3])));
++        t[2] = uint8_t(std::min(255.0f, c[2] + float(t[2]) * (1 - c[3])));
++      }
++      continue;
++    }
++    const uint32_t sy0 = dy * icono->alto / lado;
++    const uint32_t sy1 = std::max(sy0 + 1, (dy + 1) * icono->alto / lado);
++    for (uint32_t dx = 0; dx < lado; ++dx) {
++      uint8_t* t = l.Texel(x0 + dx, y0 + dy);
++      if (!t) continue;
++      const uint32_t sx0 = dx * icono->ancho / lado;
++      const uint32_t sx1 = std::max(sx0 + 1, (dx + 1) * icono->ancho / lado);
++      uint32_t n = 0, r = 0, g = 0, b = 0, a = 0;
++      for (uint32_t sy = sy0; sy < sy1; ++sy) {
++        for (uint32_t sx = sx0; sx < sx1; ++sx) {
++          const uint8_t* p = icono->rgba.data() + (size_t(sy) * icono->ancho + sx) * 4;
++          r += uint32_t(p[0]) * p[3];
++          g += uint32_t(p[1]) * p[3];
++          b += uint32_t(p[2]) * p[3];
++          a += p[3];
++          ++n;
++        }
++      }
++      if (!a) continue;
++      // Premultiplied averages (0-255) and the coverage (0-1).
++      float cr = float(r) / float(255 * n), cg = float(g) / float(255 * n), cb = float(b) / float(255 * n);
++      const float alfa = float(a) / float(255 * n);
++      if (e.gris) cr = cg = cb = (0.299f * cr + 0.587f * cg + 0.114f * cb) * 0.35f;
++      t[0] = uint8_t(std::min(255.0f, cr + float(t[0]) * (1 - alfa)));
++      t[1] = uint8_t(std::min(255.0f, cg + float(t[1]) * (1 - alfa)));
++      t[2] = uint8_t(std::min(255.0f, cb + float(t[2]) * (1 - alfa)));
++    }
++  }
++  return x0 + lado;
++}
++
++// The lines and their icons over the background, with a character of margin. Returns the right edge of what it holds.
++uint32_t RasterizarMenu(const std::vector<std::string>& lineas, const std::vector<rex::ui::IconoEnLinea>& iconos,
++                        const LienzoMenu& l) {
++  l.Fondo();
++  uint32_t derecha = 0;
++  for (uint32_t n = 0; n < kMenuFilasTotal && n < lineas.size(); ++n) {
++    derecha = std::max(derecha, PintarLineaMenu(l, lineas[n], n));
++  }
++  for (const rex::ui::IconoEnLinea& e : iconos) {
++    if (e.linea < kMenuFilasTotal) derecha = std::max(derecha, PintarIconoMenu(l, e));
++  }
++  return derecha;
++}
++
  // ---- The presenter
  
  class PresentadorDeko3d final : public Presenter {
-@@ -135,6 +308,10 @@ class PresentadorDeko3d final : public Presenter {
+@@ -135,6 +487,10 @@ class PresentadorDeko3d final : public Presenter {
      }
      cadena_.Destruir();
      proveedor_.dispositivo().EsperarInactiva();
@@ -2344,7 +3955,12 @@ index cdf084b..4996956 100644
      for (ImagenSalida& s : salidas_) {
        proveedor_.dispositivo().DestruirBloque(s.memoria);
        s.memoria = nullptr;
-@@ -149,8 +326,8 @@ class PresentadorDeko3d final : public Presenter {
+@@ -145,12 +501,12 @@ class PresentadorDeko3d final : public Presenter {
+   bool Inicializar() {
+     ConfigNucleo config;
+     config.ranuras = 3;
+-    config.mb_subida = 1;
++    config.mb_subida = 2;  // 0.1.47: the overlay's image is 552x324 RGBA8 (~700 KB) at double resolution
      config.kb_comandos = 256;
      config.mb_codigo = 1;
      config.mb_trozo_imagenes = 1;
@@ -2355,7 +3971,7 @@ index cdf084b..4996956 100644
      config.kb_consultas = 4;
      nucleo_.Crear(proveedor_.dispositivo(), config);
      if (!CompilarPropio(proveedor_, nucleo_, vs_, true, kVsCopia, "presentador_vs") ||
-@@ -161,6 +338,49 @@ class PresentadorDeko3d final : public Presenter {
+@@ -161,6 +517,49 @@ class PresentadorDeko3d final : public Presenter {
      nucleo_.EmpezarTrabajo(++trabajo_);
      const DkSamplerDescriptor sampler = DescriptorSampler(DkFilter_Linear, DkWrapMode_ClampToEdge);
      dkCmdBufPushData(nucleo_.comandos(), nucleo_.DescriptoresSampler(), &sampler, sizeof(sampler));
@@ -2387,8 +4003,8 @@ index cdf084b..4996956 100644
 +      DkImageLayoutMaker m;
 +      dkImageLayoutMakerDefaults(&m, d.dispositivo());
 +      m.format = DkImageFormat_RGBA8_Unorm;
-+      m.dimensions[0] = kMenuAncho;
-+      m.dimensions[1] = kMenuAlto;
++      m.dimensions[0] = kMenuAnchoHd;
++      m.dimensions[1] = kMenuAltoHd;
 +      DkImageLayout disposicion;
 +      dkImageLayoutInitialize(&disposicion, &m);
 +      menu_memoria_ = d.CrearBloque(uint32_t(dkImageLayoutGetSize(&disposicion)),
@@ -2405,9 +4021,81 @@ index cdf084b..4996956 100644
      nucleo_.TerminarTrabajo();
      return InitializeCommonSurfaceIndependent();
    }
-@@ -295,10 +515,25 @@ class PresentadorDeko3d final : public Presenter {
+@@ -243,11 +642,56 @@ class PresentadorDeko3d final : public Presenter {
+       return SurfacePaintConnectResult::kFailureSurfaceUnusable;
      }
+     NWindow* ventana = static_cast<rex::ui::ViNWindowSurface&>(superficie).window();
+-    if (cadena_.creada() && ventana == ventana_ && ancho == cadena_.ancho() && alto == cadena_.alto()) {
++    // (A 1440 request already refused keeps the 1920x1080 chain it fell back to.)
++    const bool ya_recusada = uint64_t(ancho) * alto > 1920ull * 1080 && rex::ui::g_saida_1440_recusada.load() &&
++                             cadena_.ancho() == 1920 && cadena_.alto() == 1080;
++    if (cadena_.creada() && ventana == ventana_ &&
++        ((ancho == cadena_.ancho() && alto == cadena_.alto()) || ya_recusada)) {
+       return SurfacePaintConnectResult::kSuccessUnchanged;
+     }
+     cadena_.Destruir();
+     ventana_ = ventana;
++    presentes_ensayo_ = 0;
++    // 0.1.47: the experimental 2560x1440 output (b3_deko_resolucao_saida = 1440, docked). The dock's HDMI is 1080p at
++    // most: the buffers are larger than the display and the compositor scales them down (as it scales 900/720/540
++    // up). Tried inside a deko3d trial (errors not fatal on this thread); refused (or short of memory) -> 1920x1080
++    // now, and the window follows (g_saida_1440_recusada).
++    if (uint64_t(ancho) * alto > 1920ull * 1080) {
++      char motivo[192] = "";
++      bool creada = false;
++      // The 3 swapchain images (RGBA8) and the mailbox's guest outputs (RGB10A2, painted at this size by the
++      // upscaler), plus a margin for the renderer.
++      const uint64_t necesario =
++          uint64_t(ancho) * alto * 4 * (Presentacion::kImagenes + kGuestOutputMailboxSize) + (128ull << 20);
++      const uint64_t libre = MemoriaLibreHeap();
++      if (rex::ui::g_saida_1440_recusada.load()) {
++        std::snprintf(motivo, sizeof(motivo), "ja recusada nesta sessao");
++      } else if (libre < necesario) {
++        std::snprintf(motivo, sizeof(motivo), "memoria livre %llu MB < %llu MB necessarios",
++                      (unsigned long long)(libre >> 20), (unsigned long long)(necesario >> 20));
++      } else {
++        AbrirEnsayo();
++        creada = cadena_.Crear(proveedor_.dispositivo(), ancho, alto, 0, ventana);
++        if (!CerrarEnsayo(motivo, sizeof(motivo))) {
++          creada = false;
++        }
++        if (!creada && !motivo[0]) {
++          std::snprintf(motivo, sizeof(motivo), "dkSwapchainCreate falhou");
++        }
++      }
++      if (creada) {
++        presentes_ensayo_ = kPresentesEnsayo;
++        REXLOG_INFO("[deko3d] saida {}x{} (experimental) criada (memoria livre {} MB); os primeiros {} presents sao "
++                    "vigiados",
++                    ancho, alto, libre >> 20, kPresentesEnsayo);
++        return SurfacePaintConnectResult::kSuccess;
++      }
++      cadena_.Destruir();
++      rex::ui::g_saida_1440_recusada.store(true);
++      REXLOG_WARN("[deko3d] saida 1440 recusada pelo sistema: {}; usando 1920x1080", motivo);
++      ancho = 1920;
++      alto = 1080;
++    }
+     cadena_.Crear(proveedor_.dispositivo(), ancho, alto, 0, ventana);
+     REXLOG_INFO("[deko3d] presentador: cadena de {}x{} en la ventana del sistema", ancho, alto);
+     return SurfacePaintConnectResult::kSuccess;
+@@ -293,12 +737,39 @@ class PresentadorDeko3d final : public Presenter {
+     if (!cadena_.creada()) {
+       return PaintResult::kNotPresentedConnectionOutdated;
+     }
++    // The first presents of the experimental 1440 chain run inside a deko3d trial: if the system refuses its
++    // buffers (acquire or present fails), back to 1080 instead of ending the process.
++    const bool ensayo = presentes_ensayo_.load() > 0;
++    if (ensayo) {
++      AbrirEnsayo();
++    }
      const int imagen = cadena_.Adquirir();
++    if (ensayo) {
++      if (imagen < 0 || EnsayoConError()) {
++        return RecusarSaidaGrande("a aquisicao de imagem falhou");
++      }
++      CerrarEnsayo();  // the paint itself stays under the usual fatal errors; the present is watched again below
++    }
      const uint32_t ancho = cadena_.ancho(), alto = cadena_.alto();
 +    RexSwitchPerfVsyncRelajado(REXCVAR_GET(b3_deko_vsync_relaxado) ? 1u : 0u);
 +    if (++vsync_cuadros_ >= 600) {  // every ~10 s with a fixed interval: how many late frames went out relaxed
@@ -2431,7 +4119,7 @@ index cdf084b..4996956 100644
      DkImageView vista;
      dkImageViewDefaults(&vista, &cadena_.Imagen(imagen));
      dkCmdBufBindRenderTarget(c, &vista, nullptr);
-@@ -353,6 +588,12 @@ class PresentadorDeko3d final : public Presenter {
+@@ -353,17 +824,255 @@ class PresentadorDeko3d final : public Presenter {
          }
        }
      }
@@ -2444,9 +4132,42 @@ index cdf084b..4996956 100644
      nucleo_.TerminarTrabajo();
  
      if (execute_ui_drawers) {
-@@ -364,6 +605,171 @@ class PresentadorDeko3d final : public Presenter {
+       ContextoUIDeko3d contexto(*this, ancho, alto, cadena_.Imagen(imagen));
+       ExecuteUIDrawersFromUIThread(contexto);
+     }
++    if (ensayo) {
++      AbrirEnsayo();
++    }
+     cadena_.Presentar(imagen);
++    if (ensayo) {
++      if (EnsayoConError()) {
++        return RecusarSaidaGrande("o present falhou");
++      }
++      CerrarEnsayo();
++      if (presentes_ensayo_.fetch_sub(1) == 1) {
++        REXLOG_INFO("[deko3d] saida {}x{} (experimental): {} presents sem erro do sistema", ancho, alto,
++                    kPresentesEnsayo);
++      }
++    }
+     return PaintResult::kPresented;
    }
  
++  // The experimental 1440 chain failed in a present (inside the trial): the chain is dropped and the connection
++  // reported outdated; the window goes to 1920x1080 (g_saida_1440_recusada) and the reconnection makes that chain.
++  PaintResult RecusarSaidaGrande(const char* que) {
++    char motivo[192] = "";
++    CerrarEnsayo(motivo, sizeof(motivo));
++    presentes_ensayo_.store(0);
++    rex::ui::g_saida_1440_recusada.store(true);
++    REXLOG_WARN("[deko3d] saida 1440 recusada pelo sistema: {} ({}); voltando a 1920x1080", que,
++                motivo[0] ? motivo : "sem detalhe");
++    if (nucleo_.TrabajoAbierto()) {
++      nucleo_.TerminarTrabajo();
++    }
++    cadena_.Destruir();
++    return PaintResult::kNotPresentedConnectionOutdated;
++  }
++
   private:
 +  // Counts this image and, twice a second, writes the new text into the counter's image.
 +  void ActualizarContador(DkCmdBuf c) {
@@ -2511,6 +4232,7 @@ index cdf084b..4996956 100644
 +  bool ActualizarMenu(DkCmdBuf c) {
 +    Superposicion& s = LaSuperposicion();
 +    std::vector<std::string> lineas;
++    std::vector<rex::ui::IconoEnLinea> iconos;
 +    std::string letreiro;
 +    uint64_t version;
 +    uint32_t filas_aviso = 0;
@@ -2522,6 +4244,7 @@ index cdf084b..4996956 100644
 +      copiar_lineas = s.version != menu_version_;
 +      if (copiar_lineas) {
 +        lineas = aviso ? s.aviso : s.lineas;
++        iconos = aviso ? s.iconos_aviso : s.iconos;
 +        if (aviso) filas_aviso = std::min(kMenuFilas, uint32_t(lineas.size()));
 +      }
 +      if (!aviso) letreiro = s.letreiro;
@@ -2547,24 +4270,53 @@ index cdf084b..4996956 100644
 +      menu_letreiro_.clear();
 +    }
 +    if (!copiar_lineas && visible == menu_letreiro_visible_) return true;
++    if (!copiar_lineas && menu_con_letreiro_ && !visible.empty() && !menu_filas_aviso_) {
++      // Only the marquee scrolled: its line alone into the image.
++      const uint32_t y0 = kMenuFilas * kMenuLineaHd + 4 * kMenuHd;  // its cell, from half a line of margin up
++      const uint32_t bytes = kMenuAnchoHd * kMenuLineaHd * 4;
++      const Subida tira = nucleo_.Reservar(bytes, 256);
++      if (!tira) return true;  // the old one stays
++      menu_tira_.resize(bytes);
++      const LienzoMenu lienzo = {menu_tira_.data(), y0, kMenuLineaHd};
++      lienzo.Fondo();
++      PintarLineaMenu(lienzo, visible, kMenuFilas);
++      std::memcpy(tira.cpu, menu_tira_.data(), bytes);  // the upload ring is not CPU-cached: one write pass
++      DkImageView v;
++      dkImageViewDefaults(&v, &menu_imagen_);
++      const DkCopyBuf origen = {tira.gpu, 0, 0};
++      const DkImageRect rect = {0, y0, 0, kMenuAnchoHd, kMenuLineaHd, 1};
++      dkCmdBufCopyBufferToImage(c, &origen, &v, &rect, 0);
++      dkCmdBufBarrier(c, DkBarrier_Full, DkInvalidateFlags_Image);
++      menu_letreiro_visible_ = visible;
++      return true;
++    }
 +    if (!copiar_lineas) {
-+      lineas = menu_lineas_;  // only the marquee moved
++      lineas = menu_lineas_;  // only the marquee changed
++      iconos = menu_iconos_;
 +      filas_aviso = menu_filas_aviso_;
 +    }
-+    const Subida subida = nucleo_.Reservar(kMenuAncho * kMenuAlto * 4, 256);
++    const uint32_t bytes = kMenuAnchoHd * kMenuAltoHd * 4;
++    const Subida subida = nucleo_.Reservar(bytes, 256);
 +    if (!subida) return false;
 +    menu_lineas_ = lineas;
++    menu_iconos_ = iconos;
 +    menu_letreiro_visible_ = visible;
 +    menu_con_letreiro_ = !visible.empty() && !filas_aviso;
 +    if (menu_con_letreiro_) {
 +      lineas.resize(kMenuFilas);
 +      lineas.push_back(visible);
 +    }
-+    RasterizarMenu(lineas, subida.cpu);
++    menu_cpu_.resize(bytes);
++    const LienzoMenu lienzo = {menu_cpu_.data(), 0, kMenuAltoHd};
++    const uint32_t derecha = RasterizarMenu(lineas, iconos, lienzo);
++    std::memcpy(subida.cpu, menu_cpu_.data(), bytes);  // the upload ring is not CPU-cached: one write pass
++    // The notification's box is as wide as its widest line plus a character of margin.
++    menu_ancho_usado_ =
++        filas_aviso ? std::min(kMenuAnchoHd, (derecha + kMenuCeldaHd + kMenuHd - 1) / kMenuHd * kMenuHd) : kMenuAnchoHd;
 +    DkImageView v;
 +    dkImageViewDefaults(&v, &menu_imagen_);
 +    const DkCopyBuf origen = {subida.gpu, 0, 0};
-+    const DkImageRect rect = {0, 0, 0, kMenuAncho, kMenuAlto, 1};
++    const DkImageRect rect = {0, 0, 0, kMenuAnchoHd, kMenuAltoHd, 1};
 +    dkCmdBufCopyBufferToImage(c, &origen, &v, &rect, 0);
 +    dkCmdBufBarrier(c, DkBarrier_Full, DkInvalidateFlags_Image);
 +    menu_version_ = version;
@@ -2574,14 +4326,18 @@ index cdf084b..4996956 100644
 +
 +  // The overlay in the middle of the screen, scaled up by whole steps.
 +  void PintarMenu(DkCmdBuf c, uint32_t ancho, uint32_t alto) {
-+    const uint32_t escala = std::max<uint32_t>(2, std::min(ancho * 9 / 10 / kMenuAncho, alto / 3 / kMenuAlto));
++    // Even: the image has kMenuHd texels per step, sampled 1:1 or 2:1 with nearest filtering.
++    const uint32_t escala =
++        std::max<uint32_t>(2, std::min(ancho * 9 / 10 / kMenuAncho, alto / 3 / kMenuAlto)) / kMenuHd * kMenuHd;
 +    const uint32_t alto_usado =
 +        menu_filas_aviso_ ? (menu_filas_aviso_ + 1) * 9 : (kMenuFilas + (menu_con_letreiro_ ? 1u : 0u) + 1) * 9;
-+    const float w = float(kMenuAncho * escala) / float(ancho) * 2;
++    const uint32_t ancho_usado = menu_filas_aviso_ ? menu_ancho_usado_ : kMenuAnchoHd;  // texels of the image
++    const float w = float(ancho_usado * (escala / kMenuHd)) / float(ancho) * 2;
 +    const float h = float(alto_usado * escala) / float(alto) * 2;
 +    const float x0 = menu_filas_aviso_ ? 0.95f - w : -w / 2;
 +    const float y0 = menu_filas_aviso_ ? 0.92f : h / 2;
-+    const float datos[8] = {x0, y0, x0 + w, y0 - h, 0, 0, 1, float(alto_usado) / float(kMenuAlto)};
++    const float datos[8] = {x0, y0, x0 + w, y0 - h, 0, 0, float(ancho_usado) / float(kMenuAnchoHd),
++                            float(alto_usado) / float(kMenuAlto)};
 +    const Subida ubo = nucleo_.Reservar(sizeof(datos), DK_UNIFORM_BUF_ALIGNMENT);
 +    if (!ubo) return;
 +    std::memcpy(ubo.cpu, datos, sizeof(datos));
@@ -2602,6 +4358,9 @@ index cdf084b..4996956 100644
 +  uint64_t menu_version_ = 0;
 +  uint32_t menu_filas_aviso_ = 0;
 +  std::vector<std::string> menu_lineas_;  // what the image holds (without the marquee)
++  std::vector<rex::ui::IconoEnLinea> menu_iconos_;
++  std::vector<uint8_t> menu_cpu_, menu_tira_;  // rasterized here (CPU-cached), then copied to the upload ring
++  uint32_t menu_ancho_usado_ = kMenuAnchoHd;  // texels: the notification's box is cropped to its text
 +  std::string menu_letreiro_, menu_letreiro_visible_;
 +  uint32_t menu_letreiro_pos_ = 0, menu_letreiro_cuadros_ = 0;
 +  bool menu_con_letreiro_ = false;
@@ -2616,7 +4375,17 @@ index cdf084b..4996956 100644
    struct ImagenSalida {
      DkMemBlock memoria = nullptr;
      DkImage imagen{};
-@@ -614,7 +1020,7 @@ std::unique_ptr<ProveedorDeko3d> ProveedorDeko3d::Crear() {
+@@ -376,6 +1085,9 @@ class PresentadorDeko3d final : public Presenter {
+   Nucleo nucleo_;  // the painting thread's
+   Presentacion cadena_;
+   NWindow* ventana_ = nullptr;
++  // The experimental 1440 chain: how many of its next presents still run inside a deko3d trial.
++  static constexpr uint32_t kPresentesEnsayo = 8;
++  std::atomic<uint32_t> presentes_ensayo_{0};
+   DkShader vs_{}, fs_{};
+   uint64_t trabajo_ = 0;
+   std::array<ImagenSalida, kGuestOutputMailboxSize> salidas_{};
+@@ -614,7 +1326,7 @@ std::unique_ptr<ProveedorDeko3d> ProveedorDeko3d::Crear() {
    // A deko3d failure ends the process: the core flushes before every creation and before Fatal.
    FijarRegistro([](const char* linea) { REXLOG_INFO("{}", linea); }, [] { rex::FlushLogging(); });
    std::unique_ptr<ProveedorDeko3d> p(new ProveedorDeko3d());
@@ -2625,18 +4394,89 @@ index cdf084b..4996956 100644
    p->compilador_ = std::make_unique<Compilador>();
    return p;
  }
-@@ -644,3 +1050,29 @@ std::unique_ptr<rex::ui::ImmediateDrawer> ProveedorDeko3d::CreateImmediateDrawer
+@@ -644,3 +1356,94 @@ std::unique_ptr<rex::ui::ImmediateDrawer> ProveedorDeko3d::CreateImmediateDrawer
  }
  
  }  // namespace rex::deko3d
 +
 +namespace rex::ui {
-+void FijarSuperposicion(std::vector<std::string> lineas) {
++namespace {
++bool MismosIconos(const std::vector<IconoEnLinea>& a, const std::vector<IconoEnLinea>& b) {
++  if (a.size() != b.size()) return false;
++  for (size_t i = 0; i < a.size(); ++i) {
++    if (a[i].linea != b[i].linea || a[i].columna != b[i].columna || a[i].filas != b[i].filas ||
++        a[i].gris != b[i].gris || a[i].icono != b[i].icono) {
++      return false;
++    }
++  }
++  return true;
++}
++}  // namespace
++
++void FijarSuperposicion(std::vector<std::string> lineas) { FijarSuperposicionConIconos(std::move(lineas), {}); }
++
++void FijarSuperposicionConIconos(std::vector<std::string> lineas, std::vector<IconoEnLinea> iconos) {
 +  auto& s = rex::deko3d::LaSuperposicion();
 +  std::lock_guard<std::mutex> cerrojo(s.candado);
-+  if (lineas == s.lineas) return;
++  if (lineas == s.lineas && MismosIconos(iconos, s.iconos)) return;
 +  s.lineas = std::move(lineas);
++  s.iconos = std::move(iconos);
 +  ++s.version;
++}
++
++void AvisarSuperposicionConIcono(std::vector<std::string> lineas, IconoEnLinea icono) {
++  auto& s = rex::deko3d::LaSuperposicion();
++  std::lock_guard<std::mutex> cerrojo(s.candado);
++  s.aviso = std::move(lineas);
++  s.iconos_aviso.clear();
++  if (icono.icono) s.iconos_aviso.push_back(std::move(icono));
++  s.vence_aviso = std::chrono::steady_clock::now() + std::chrono::seconds(4);
++  ++s.version;
++}
++
++IconoCompartido DecodificarIcono(uint32_t id, const uint8_t* datos, size_t tamano, uint32_t lado_maximo) {
++  int ancho = 0, alto = 0;
++  std::vector<uint8_t> rgba = DecodeImageRGBA(datos, tamano, ancho, alto);
++  if (rgba.empty() || ancho <= 0 || alto <= 0) return nullptr;
++  auto icono = std::make_shared<IconoSuperposicion>();
++  icono->id = id;
++  const uint32_t kLado = std::clamp<uint32_t>(lado_maximo, 1, 256);  // the largest the caller draws
++  const uint32_t w = uint32_t(ancho), h = uint32_t(alto);
++  if (w <= kLado && h <= kLado) {
++    icono->ancho = w;
++    icono->alto = h;
++    icono->rgba = std::move(rgba);
++    return icono;
++  }
++  // A box filter (alpha-weighted) down to fit kLado x kLado, keeping the aspect.
++  const uint32_t dw = w >= h ? kLado : std::max<uint32_t>(1, kLado * w / h);
++  const uint32_t dh = h >= w ? kLado : std::max<uint32_t>(1, kLado * h / w);
++  icono->ancho = dw;
++  icono->alto = dh;
++  icono->rgba.resize(size_t(dw) * dh * 4);
++  for (uint32_t dy = 0; dy < dh; ++dy) {
++    const uint32_t sy0 = dy * h / dh, sy1 = std::max(sy0 + 1, (dy + 1) * h / dh);
++    for (uint32_t dx = 0; dx < dw; ++dx) {
++      const uint32_t sx0 = dx * w / dw, sx1 = std::max(sx0 + 1, (dx + 1) * w / dw);
++      uint64_t r = 0, g = 0, b = 0, a = 0, n = 0;
++      for (uint32_t sy = sy0; sy < sy1; ++sy) {
++        for (uint32_t sx = sx0; sx < sx1; ++sx) {
++          const uint8_t* p = rgba.data() + (size_t(sy) * w + sx) * 4;
++          r += uint64_t(p[0]) * p[3];
++          g += uint64_t(p[1]) * p[3];
++          b += uint64_t(p[2]) * p[3];
++          a += p[3];
++          ++n;
++        }
++      }
++      uint8_t* t = icono->rgba.data() + (size_t(dy) * dw + dx) * 4;
++      t[0] = a ? uint8_t(r / a) : 0;  // straight color: alpha-weighted average
++      t[1] = a ? uint8_t(g / a) : 0;
++      t[2] = a ? uint8_t(b / a) : 0;
++      t[3] = uint8_t(a / n);
++    }
++  }
++  return icono;
 +}
 +
 +void FijarLetreiro(std::string texto) {
@@ -2647,13 +4487,7 @@ index cdf084b..4996956 100644
 +  ++s.version;
 +}
 +
-+void AvisarSuperposicion(std::vector<std::string> lineas) {
-+  auto& s = rex::deko3d::LaSuperposicion();
-+  std::lock_guard<std::mutex> cerrojo(s.candado);
-+  s.aviso = std::move(lineas);
-+  s.vence_aviso = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-+  ++s.version;
-+}
++void AvisarSuperposicion(std::vector<std::string> lineas) { AvisarSuperposicionConIcono(std::move(lineas), {}); }
 +}  // namespace rex::ui
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
 index d1b2a1c..73742e6 100644
@@ -2669,7 +4503,7 @@ index d1b2a1c..73742e6 100644
  #endif
      }
 diff --git a/src/ui/switch_apm.cpp b/src/ui/switch_apm.cpp
-index b71ce09..2965227 100644
+index b71ce09..0715c52 100644
 --- a/src/ui/switch_apm.cpp
 +++ b/src/ui/switch_apm.cpp
 @@ -82,6 +82,11 @@ std::atomic<int> g_correcciones_emc{0};
@@ -2684,39 +4518,117 @@ index b71ce09..2965227 100644
  /*
   * How often the watchdog looks. For the first kTicsSeguidos ticks (one second each) it always looks,
   * which is when the system finishes applying the change (the profile already saw 1600 in its first
-@@ -269,6 +274,7 @@ extern "C" void RexSwitchApmAplicar(void) {
+@@ -249,7 +254,41 @@ extern "C" void RexSwitchApmAplicar(void) {
+    * moving the memory is accepted. The check is the 1.5 s poll, not a single read: a read at 250 ms
+    * once said the memory was still at 1331.2, and one second later it was at 1600.
+    */
+-  for (const Candidata& c : kCandidatas) {
++  // Remember what to give back on restore. A leftover boost from a previous apply is never saved.
++  auto guardar_original = [&]() {
++    uint32_t a_guardar = config_original;
++    bool hay = hay_original;
++    if (hay) {
++      for (const Candidata& k : kCandidatas) {
++        if (k.config == config_original) {
++          a_guardar = 0x00020003u;
++          std::fprintf(stderr,
++                       "[apm] la config de partida 0x%08X era un boost anterior: se guarda 0x00020003 "
++                       "(GPU 307.2 + EMC 1331.2) como original\n",
++                       config_original);
++          break;
++        }
++      }
++    }
++    g_config_original_guardada.store(a_guardar);
++    g_hay_config_original.store(hay);
++  };
++
++  // With RAM 1600 allowed, the official 0x92220007 (GPU 460.8 + EMC 1600) is tried first.
++  Candidata orden[sizeof(kCandidatas) / sizeof(kCandidatas[0])];
++  size_t n_orden = 0;
++  const bool ram1600 = g_permitir_ram_1600.load(std::memory_order_relaxed);
++  if (ram1600) {
++    for (const Candidata& k : kCandidatas) {
++      if (k.config == 0x92220007u) orden[n_orden++] = k;
++    }
++  }
++  for (const Candidata& k : kCandidatas) {
++    if (!(ram1600 && k.config == 0x92220007u)) orden[n_orden++] = k;
++  }
++
++  for (size_t idx = 0; idx < n_orden; ++idx) {
++    const Candidata& c = orden[idx];
+     if (c.mhz != mhz) {
+       continue;
+     }
+@@ -264,11 +303,13 @@ extern "C" void RexSwitchApmAplicar(void) {
+     if (gpu_subio && memoria_quieta) {
+       if (!quieta_de_verdad) {
+         std::fprintf(stderr,
+-                     "[apm] 0x%08X sube la memoria a %.1f MHz, pero nfsmw_switch_ram_1600 esta en "
+-                     "true: se acepta y NO se vigila la memoria\n",
++                     "[apm] 0x%08X sube la memoria a %.1f MHz: RAM 1600 oficial permitida, se acepta y "
++                     "NO se vigila la memoria\n",
                       c.config, double(emc1) / 1e6);
-         std::fprintf(stderr, "[apm] PUESTA 0x%08X: GPU %.1f MHz (era %.1f), memoria %.1f MHz\n",
+-        std::fprintf(stderr, "[apm] PUESTA 0x%08X: GPU %.1f MHz (era %.1f), memoria %.1f MHz\n",
++        std::fprintf(stderr, "[apm] PUESTA 0x%08X (RAM 1600 oficial): GPU %.1f MHz (era %.1f), memoria %.1f MHz\n",
                       c.config, double(gpu1) / 1e6, double(gpu0) / 1e6, double(emc1) / 1e6);
++        guardar_original();
 +        g_aplicada.store(true);
          return;  // watchdog not armed: lowering it would fight what the cvar asks for
        }
        /*
-@@ -282,6 +288,7 @@ extern "C" void RexSwitchApmAplicar(void) {
+@@ -282,6 +323,8 @@ extern "C" void RexSwitchApmAplicar(void) {
                     "queda vigilada\n",
                     c.config, c.mhz, c.emc, double(gpu1) / 1e6, double(gpu0) / 1e6,
                     double(emc1) / 1e6, double(kSondeoPasoNs) * kSondeoPasos / 1e9);
++      guardar_original();
 +      g_aplicada.store(true);
        return;
      }
      std::fprintf(stderr, "[apm] descartada 0x%08X: GPU %.1f MHz, memoria %.1f MHz (%s)\n", c.config,
-@@ -313,6 +320,23 @@ extern "C" void RexSwitchApmAplicar(void) {
+@@ -313,6 +356,48 @@ extern "C" void RexSwitchApmAplicar(void) {
    }
  }
  
 +// b3_gpu_boost off: the profile the console had before RexSwitchApmAplicar comes back, and the next call may ask again.
-+extern "C" void RexSwitchApmRestaurar(void) {
++// Returns 1 = restored ok or nothing to do, 0 = rejected / could not restore.
++extern "C" int RexSwitchApmRestaurar(void) {
++  int resultado = 1;
 +  if (g_aplicada.exchange(false)) {
 +    ApmPerformanceMode modo = ApmPerformanceMode_Invalid;
-+    if (R_SUCCEEDED(apmGetPerformanceMode(&modo)) && modo == ApmPerformanceMode_Normal &&
-+        g_hay_config_original.load()) {
-+      const bool ok = R_SUCCEEDED(apmSetPerformanceConfiguration(modo, g_config_original_guardada.load()));
-+      std::fprintf(stderr, "[apm] perfil original 0x%08X restaurado (%s)\n", g_config_original_guardada.load(),
++    if (R_FAILED(apmGetPerformanceMode(&modo))) {
++      std::fprintf(stderr, "[apm] restaurar: no se pudo leer el modo de rendimiento\n");
++      resultado = 0;
++    } else if (modo != ApmPerformanceMode_Normal) {
++      std::fprintf(stderr, "[apm] restaurar: consola en sobremesa (modo %d), nada que hacer\n", int(modo));
++    } else {
++      uint32_t config = 0x00020003u;  // stock handheld: GPU 307.2 + EMC 1331.2
++      const bool guardada = g_hay_config_original.load();
++      if (guardada) {
++        config = g_config_original_guardada.load();
++      } else {
++        std::fprintf(stderr, "[apm] restaurar: no habia config original guardada, se usa 0x00020003\n");
++      }
++      const bool ok = R_SUCCEEDED(apmSetPerformanceConfiguration(modo, config));
++      std::fprintf(stderr, "[apm] perfil original 0x%08X restaurado (%s)\n", config,
 +                   ok ? "ok" : "RECHAZADO");
++      if (!ok) resultado = 0;
++      // Let the clocks settle, then log what the hardware really runs at.
++      svcSleepThread(500000000ULL);
++      u32 gpu = 0, emc = 0;
++      if (LeerRelojes(gpu, emc)) {
++        std::fprintf(stderr, "[apm] tras restaurar: GPU %.1f MHz, memoria %.1f MHz\n", double(gpu) / 1e6,
++                     double(emc) / 1e6);
++      }
 +    }
++  } else {
++    std::fprintf(stderr, "[apm] restaurar: no habia nada aplicado, nada que hacer\n");
 +  }
++  g_hay_config_original.store(false);
 +  g_emc_original.store(0, std::memory_order_relaxed);  // the watchdog has nothing left to guard
 +  g_hecho.store(false);
++  return resultado;
 +}
 +
 +extern "C" int RexSwitchApmAtivo(void) { return g_aplicada.load() ? 1 : 0; }
@@ -2724,18 +4636,29 @@ index b71ce09..2965227 100644
  extern "C" void RexSwitchApmVigilar(void) {
    const u32 emc0 = g_emc_original.load(std::memory_order_relaxed);
    if (emc0 == 0 || g_rendido_emc.load(std::memory_order_relaxed)) {
-@@ -352,4 +376,6 @@ extern "C" void RexSwitchApmPedirGpuMhz(int) {}
+@@ -352,4 +437,6 @@ extern "C" void RexSwitchApmPedirGpuMhz(int) {}
  extern "C" void RexSwitchApmPermitirRam1600(int) {}
  extern "C" void RexSwitchApmAplicar(void) {}
  extern "C" void RexSwitchApmVigilar(void) {}
-+extern "C" void RexSwitchApmRestaurar(void) {}
++extern "C" int RexSwitchApmRestaurar(void) { return 1; }
 +extern "C" int RexSwitchApmAtivo(void) { return 0; }
  #endif  // REX_PLATFORM_SWITCH
 diff --git a/src/ui/switch_perf.cpp b/src/ui/switch_perf.cpp
-index 6b3d30a..0e21ac7 100644
+index 6b3d30a..cd1f90f 100644
 --- a/src/ui/switch_perf.cpp
 +++ b/src/ui/switch_perf.cpp
-@@ -232,6 +232,24 @@ extern "C" void RexSwitchPerfToggleAb(void) {
+@@ -103,7 +103,9 @@ constexpr u64 kReportSeconds = 10;
+ constexpr u64 kStartDelayNs = 8000000000ULL;
+ constexpr size_t kMaxSamples = 1 << 15;
+ constexpr size_t kFrames = 10;
+-constexpr unsigned kCounterCount = 33;
++// 33 guest audio callback max us, 34 sum us, 35 count, 36 concealed repeats, 37 mixer threads at 0x2D,
++// 38/39 callback max us of clients 0/1, 40 callbacks longer than one 5.333 ms audio period.
++constexpr unsigned kCounterCount = 41;
+ // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
+ std::string ReportPath() {
+   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
+@@ -232,6 +234,24 @@ extern "C" void RexSwitchPerfToggleAb(void) {
    }
  }
  
@@ -2760,7 +4683,44 @@ index 6b3d30a..0e21ac7 100644
  /*
   * Horizon limits how much memory a process may map (LimitableResource_Memory). Our
   * guest memory model maps each chunk several times (the shadow and once per 360
-@@ -808,6 +826,9 @@ void ProfilerMain(void*) {
+@@ -414,13 +434,31 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
+   // in handheld mode.
+   const u64 pico_audio = g_counters[23].exchange(0, std::memory_order_relaxed);
+   std::fprintf(f,
+-               "     audio: %.0f bloques de cliente mezclados, %.0f solicitudes sin datos, "
+-               "%.0f/%.0f buffers audout con PCM no nulo, %.0f muestras saturadas (mas de 1,0 antes de recortar), "
+-               "%.0f buffers con pico de 0,98 o mas, pico maximo %.3f | consola en modo %s\n",
++               "     audio: %.0f client blocks mixed, %.0f requests without data, "
++               "%.0f/%.0f audout buffers with non-zero PCM, %.0f saturated samples (above 1.0 before clipping), "
++               "%.0f buffers with a peak of 0.98 or more, max peak %.3f | console in %s mode\n",
+                delta(24), delta(25), delta(26), delta(27), delta(21), delta(22), double(pico_audio) / 10000.0,
+                rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console)
+-                   ? "sobremesa"
+-                   : "portatil");
++                   ? "docked"
++                   : "handheld");
++  // Guest audio callback time per window (33 max us, reset here like 23; 34 sum us / 35 calls = average) and
++  // frames concealed by repeating the previous one (36, audio_switch_ocultar_faltas). 38/39: max us of
++  // clients 0 and 1, reset here like 33; 40: callbacks longer than one 5.333 ms period. With
++  // audio_parallel_client_callbacks each client has its own worker, so a client misses frames only when its
++  // own callback passes 5333 us; with one serial worker the period is shared (client 0 + client 1).
++  {
++    const u64 cb_max = g_counters[33].exchange(0, std::memory_order_relaxed);
++    const u64 cb_max0 = g_counters[38].exchange(0, std::memory_order_relaxed);
++    const u64 cb_max1 = g_counters[39].exchange(0, std::memory_order_relaxed);
++    const double cb_n = delta(35);
++    // 37: guest audio mixer threads raised to 0x2D (absolute count, never reset; xboxkrnl_threading.cpp).
++    std::fprintf(f, "     game audio callback: max %.0f us, avg %.0f us (%.0f calls) | concealment repeats: %.0f"
++                    " | game mixer: %llu thread(s) at priority 0x2D | max per client: %.0f us / %.0f us"
++                    " | over 5333 us: %.0f\n",
++                 double(cb_max), cb_n > 0.0 ? delta(34) / cb_n : 0.0, cb_n, delta(36),
++                 static_cast<unsigned long long>(counters_now[37]), double(cb_max0), double(cb_max1),
++                 delta(40));
++  }
+   // Reverse-NX state as is, without interpretation. A whole test session was wasted because its
+   // overlay said "Docked" while "Controlled by system" was Yes, and in that case its mode does not
+   // rule: it only mirrors the console's. This shows at a glance which of the two is happening.
+@@ -808,6 +846,9 @@ void ProfilerMain(void*) {
      sample_stacks = true;
      std::fclose(flag);
    }
@@ -2770,7 +4730,7 @@ index 6b3d30a..0e21ac7 100644
  
    u64 counters_last[kCounterCount]{};
    for (unsigned i = 0; i < kCounterCount; ++i) {
-@@ -831,6 +852,7 @@ void ProfilerMain(void*) {
+@@ -831,6 +872,7 @@ void ProfilerMain(void*) {
    size_t rr = 0;
    size_t mode_index = 0;
    while (true) {
@@ -2778,7 +4738,7 @@ index 6b3d30a..0e21ac7 100644
      __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
  
      for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
-@@ -990,11 +1012,55 @@ void __wrap_armDCacheClean(void* addr, size_t size) {
+@@ -990,11 +1032,55 @@ void __wrap_armDCacheClean(void* addr, size_t size) {
   */
  std::atomic<unsigned> g_intervalo_swap{0};
  
@@ -2837,7 +4797,7 @@ index 6b3d30a..0e21ac7 100644
    }
    const Result rc = __real_nwindowQueueBuffer(nw, slot, fence);
    Anotar(kQueueBuffer, desde);
-@@ -1038,6 +1104,17 @@ void RexSwitchPerfIntervaloSwap(unsigned vblanks) {
+@@ -1038,6 +1124,17 @@ void RexSwitchPerfIntervaloSwap(unsigned vblanks) {
    g_intervalo_swap.store(vblanks, std::memory_order_relaxed);
  }
  
@@ -2856,21 +4816,27 @@ index 6b3d30a..0e21ac7 100644
    if (id < kCounterCount) {
      g_counters[id].fetch_add(1, std::memory_order_relaxed);
 diff --git a/src/ui/window_switch.cpp b/src/ui/window_switch.cpp
-index 4612c9a..5dadb1e 100644
+index 4612c9a..22eacad 100644
 --- a/src/ui/window_switch.cpp
 +++ b/src/ui/window_switch.cpp
-@@ -19,6 +19,10 @@
+@@ -19,9 +19,16 @@
  #include "rex/ui/switch_saltynx.h"
  
  REXCVAR_DECLARE(bool, input_xbox_layout);  // defined in switch_input_driver.cpp
 +REXCVAR_DEFINE_INT32(b3_deko_resolucao_saida, 1080, "Budokai 3",
-+                     "Altura da saida (cadeia de apresentacao): no dock 1080 (1920x1080, padrao), 900 (1600x900), 720 "
++                     "Altura da saida (cadeia de apresentacao): no dock 1440 (2560x1440, EXPERIMENTAL: se o sistema "
++                     "recusar volta a 1080), 1080 (1920x1080, padrao), 900 (1600x900), 720 "
 +                     "(1280x720) ou 540 (960x540); portatil 720 (1280x720), 540 (960x540) ou 360 (640x360). Valor "
 +                     "invalido para o modo atual vira o maximo do modo. Ao vivo: troca a cadeia como o dock/portatil.");
  
  namespace rex::ui {
  
-@@ -65,16 +69,17 @@ SwitchWindowedAppContext& WindowSwitch::switch_app_context() const {
++std::atomic<bool> g_saida_1440_recusada{false};
++
+ bool ViNWindowSurface::GetSizeImpl(uint32_t& width_out, uint32_t& height_out) const {
+   width_out = owner_.GetActualPhysicalWidth();
+   height_out = owner_.GetActualPhysicalHeight();
+@@ -65,16 +72,21 @@ SwitchWindowedAppContext& WindowSwitch::switch_app_context() const {
  void WindowSwitch::QueryDisplayResolution(uint32_t& width_out, uint32_t& height_out) {
    const bool docked =
        rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console);
@@ -2884,12 +4850,16 @@ index 4612c9a..5dadb1e 100644
 -  }
 -  width_out = docked ? 1920 : 1280;
 -  height_out = docked ? 1080 : 720;
-+  // b3_deko_resolucao_saida (the output height, live): docked 1080/900/720/540, handheld 720/540/360; a value that is
-+  // not valid for the current mode becomes the mode's maximum (1080 docked, 720 handheld). 16:9 always.
++  // b3_deko_resolucao_saida (the output height, live): docked 1440 (experimental)/1080/900/720/540, handheld
++  // 720/540/360; a value that is not valid for the current mode becomes the mode's maximum (1080 docked, 720
++  // handheld). 16:9 always. 1440 once refused by the system (the presenter, g_saida_1440_recusada) is 1080.
 +  const int32_t pedido = REXCVAR_GET(b3_deko_resolucao_saida);
 +  int32_t altura;
 +  if (docked) {
 +    altura = (pedido == 1080 || pedido == 900 || pedido == 720 || pedido == 540) ? pedido : 1080;
++    if (pedido == 1440 && !g_saida_1440_recusada.load(std::memory_order_relaxed)) {
++      altura = 1440;
++    }
 +  } else {
 +    altura = (pedido == 720 || pedido == 540 || pedido == 360) ? pedido : 720;
 +  }
@@ -2899,7 +4869,7 @@ index 4612c9a..5dadb1e 100644
  
  bool WindowSwitch::OpenImpl() {
 diff --git a/src/ui/windowed_app_context_switch.cpp b/src/ui/windowed_app_context_switch.cpp
-index 7755dc3..5552b11 100644
+index 7755dc3..730888b 100644
 --- a/src/ui/windowed_app_context_switch.cpp
 +++ b/src/ui/windowed_app_context_switch.cpp
 @@ -11,6 +11,7 @@
@@ -2934,7 +4904,7 @@ index 7755dc3..5552b11 100644
        focus_changed_ = true;
        break;
      case AppletHookType_OnExitRequest:
-@@ -182,6 +189,16 @@ int SwitchWindowedAppContext::RunMainMessageLoop() {
+@@ -182,6 +189,23 @@ int SwitchWindowedAppContext::RunMainMessageLoop() {
        eventClear(&impl_->display_resolution_changed);
        display_changed_ = true;
      }
@@ -2947,12 +4917,19 @@ index 7755dc3..5552b11 100644
 +        REXLOG_INFO("Switch: b3_deko_resolucao_saida={}: se reavalia o tamanho da ventana", saida);
 +        display_changed_ = true;
 +      }
++      // The experimental 1440 output refused by the system (presenter): once, back to 1080.
++      static bool recusa_vista = false;
++      if (!recusa_vista && g_saida_1440_recusada.load(std::memory_order_relaxed)) {
++        recusa_vista = true;
++        REXLOG_INFO("Switch: saida 1440 recusada: se reavalia o tamanho da ventana (1080)");
++        display_changed_ = true;
++      }
 +    }
      // And the same if what changed is Reverse-NX, which signals no event.
      {
        const bool sobremesa = rex::ui::switch_saltynx::ModoBase(
 diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
-index dcd46c7..4034031 100644
+index dcd46c7..7ccfdf2 100644
 --- a/src/x360/deko/destinos.cpp
 +++ b/src/x360/deko/destinos.cpp
 @@ -8,12 +8,18 @@
@@ -2974,14 +4951,15 @@ index dcd46c7..4034031 100644
  #include <filesystem>
  #include <fstream>
  #include <thread>
-@@ -63,6 +69,27 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sombra_minimo, true, "NFSMW",
+@@ -63,6 +69,28 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sombra_minimo, true, "NFSMW",
                      "texturas. Misma imagen. Necesita la biblioteca con tfetch2DSombraMin. Se comprueba sola. false = "
                      "copiar como antes");
  REXCVAR_DECLARE(bool, nfsmw_nativo_pcf_barato);  // nfsmw_dk_dibujos.cpp
 +REXCVAR_DEFINE_BOOL(b3_deko_restaurar_stencil, true, "Budokai 3",
 +                    "Conserva o stencil ao salvar e restaurar a profundidade principal da cena.");
 +REXCVAR_DEFINE_INT32(b3_deko_resolucao_interna, 720, "Budokai 3",
-+                     "Resolucao interna global (altura): 720, 540 ou 360, ou 0 = AUTOMATICA (720/540 pelo tempo de GPU "
++                     "Resolucao interna global (altura): 1080 (EXPERIMENTAL, so no dock: fator 1.5, cai para 720 sem "
++                     "memoria ou no portatil), 720, 540 ou 360, ou 0 = AUTOMATICA (720/540 pelo tempo de GPU "
 +                     "do quadro). Todos os alvos EDRAM e texturas resolvidas usam h/720 do tamanho do guest; nunca passa "
 +                     "da altura da saida. Ao vivo: troca na fronteira do quadro (apos o present).");
 +REXCVAR_DEFINE_BOOL(b3_deko_handover_cor, false, "Budokai 3",
@@ -3002,7 +4980,7 @@ index dcd46c7..4034031 100644
  REXCVAR_DEFINE_BOOL(nfsmw_nativo_frontal_perezoso, true, "NFSMW",
                      "Renderizador nativo (25/09, build 184): el Swap pinta el frontal desde su destino de render en vez "
                      "de copiarlo antes a la textura. Misma imagen; con FXAA se copia como siempre. false = copiar "
-@@ -109,13 +136,13 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_geometria_mb, 64, "NFSMW",
+@@ -109,13 +137,13 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_geometria_mb, 64, "NFSMW",
                       "un rango visto dos veces con el mismo contenido (XXH3) se queda y los dibujos siguientes lo usan "
                       "sin copiarlo ni convertirlo. 0 = apagado, todo al anillo como antes")
      .range(0, 256)
@@ -3018,7 +4996,7 @@ index dcd46c7..4034031 100644
  
  extern "C" void RexSwitchPerfCount(unsigned id);
  
-@@ -178,6 +205,14 @@ DkImageView VistaCompleta(const DkImage& imagen) {
+@@ -178,6 +206,14 @@ DkImageView VistaCompleta(const DkImage& imagen) {
  
  std::filesystem::path RutaCache() { return rex::filesystem::GetExecutableFolder() / "cache" / "nfsmw_dksh.bin"; }
  
@@ -3033,7 +5011,7 @@ index dcd46c7..4034031 100644
  // ---- The output pass's shaders (GLSL for uam). The same work as the Vulkan path's nfsmw_salida_rampa_gamma.frag
  // (see it for the reasons): a full-screen triangle, the source's texel, and the game's ramp.
  constexpr const char* kVsSalida = R"(#version 460
-@@ -206,7 +241,7 @@ const vec3 kPesosLuma = vec3(0.299, 0.587, 0.114);
+@@ -206,7 +242,7 @@ const vec3 kPesosLuma = vec3(0.299, 0.587, 0.114);
  float Luma(vec2 uv) { return dot(textureLod(origen, uv, 0.0).rgb, kPesosLuma); }
  
  vec3 Fxaa(vec2 uv) {
@@ -3042,7 +5020,7 @@ index dcd46c7..4034031 100644
    vec3 rgb_centro = textureLod(origen, uv, 0.0).rgb;
    float luma_centro = dot(rgb_centro, kPesosLuma);
    float luma_no = Luma(uv + vec2(-paso.x, -paso.y));
-@@ -230,6 +265,115 @@ vec3 Fxaa(vec2 uv) {
+@@ -230,6 +266,115 @@ vec3 Fxaa(vec2 uv) {
    return (luma_b < luma_min || luma_b > luma_max) ? rgb_a : rgb_b;
  }
  
@@ -3158,7 +5136,7 @@ index dcd46c7..4034031 100644
  void main() {
    ivec2 pixel = ivec2(gl_FragCoord.xy) - rampa.desplazamiento.xy;
    vec3 texel;
-@@ -237,6 +381,10 @@ void main() {
+@@ -237,6 +382,10 @@ void main() {
    texel = Fxaa((vec2(uvec2(pixel)) + 0.5) * rampa.inverso.xy);
  #elif EXACTA
    texel = texelFetch(origen, pixel, 0).rgb;
@@ -3169,7 +5147,7 @@ index dcd46c7..4034031 100644
  #else
    texel = textureLod(origen, (vec2(uvec2(pixel)) + 0.5) * rampa.inverso.xy, 0.0).rgb;
  #endif
-@@ -277,6 +425,22 @@ void main() {
+@@ -277,6 +426,22 @@ void main() {
    color = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
  }
  )";
@@ -3192,7 +5170,7 @@ index dcd46c7..4034031 100644
  constexpr const char* kFsCopiaProfundidad = R"(#version 460
  layout(binding = 0) uniform sampler2D origen;
  layout(std140, binding = 0) uniform Copia {
-@@ -287,9 +451,97 @@ void main() {
+@@ -287,9 +452,97 @@ void main() {
  }
  )";
  
@@ -3290,7 +5268,7 @@ index dcd46c7..4034031 100644
  }  // namespace
  
  // ---- Construction
-@@ -313,6 +565,9 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -313,6 +566,9 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
    lectura_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kBytesLecturaRanura, "lecturas de vuelta (por ranura)");
    lectura_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(lectura_bloque_));
    lectura_gpu_ = dkMemBlockGetGpuAddr(lectura_bloque_);
@@ -3300,7 +5278,7 @@ index dcd46c7..4034031 100644
    if (REXCVAR_GET(nfsmw_dk_perfil_gpu_s) > 0) {
      perfil_bloque_ = nucleo_.CrearBloqueLectura(kMarcasPerfil * 32, "perfil de la GPU por dibujo");
      perfil_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(perfil_bloque_));
-@@ -327,20 +582,46 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -327,20 +583,46 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
    }
    RecalcularRampa();
  
@@ -3329,8 +5307,7 @@ index dcd46c7..4034031 100644
 +    if (un_shader && (leida.size() != 1 || ruta.filename().string() != NombreShaderCache(leida.entradas().begin()->first))) {
 +      REXLOG_WARN("[deko3d] cache de DKSH {} no corresponde a su nombre", ruta.string());
 +      return 0;
-     }
--    REXLOG_WARN("[deko3d] cache de DKSH {} no se usa: {}", ruta.string(), motivo);
++    }
 +    size_t nuevas = 0;
 +    for (const auto& [clave, dksh] : leida.entradas()) {
 +      if (!cache_.Buscar(clave)) {
@@ -3349,7 +5326,8 @@ index dcd46c7..4034031 100644
 +    for (std::filesystem::directory_iterator it(carpeta_dksh, estado_cache), end;
 +         !estado_cache && it != end; it.increment(estado_cache)) {
 +      if (it->path().extension() == ".nfdk" && it->is_regular_file(estado_cache)) nuevas += leer_cache(it->path(), true);
-+    }
+     }
+-    REXLOG_WARN("[deko3d] cache de DKSH {} no se usa: {}", ruta.string(), motivo);
 +    if (estado_cache) REXLOG_WARN("[deko3d] erro ao enumerar {}: {}", carpeta_dksh.string(), estado_cache.message());
 +    REXLOG_INFO("[deko3d] cache DKSH por shader: {} arquivos validos em {}", nuevas, carpeta_dksh.string());
 +  } else {
@@ -3358,16 +5336,19 @@ index dcd46c7..4034031 100644
    }
    if (!cache_.size()) {
      REXLOG_WARN("[deko3d] sin cache de DKSH: cada shader se compila en la consola la primera vez que se usa");
-@@ -355,6 +636,18 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -355,6 +637,21 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
      REXLOG_ERROR("[deko3d] no se pudo compilar el pixel shader vacio: {}", vacio.log);
    }
    CrearShadersSalida();
 +  {
 +    const int32_t altura = REXCVAR_GET(b3_deko_resolucao_interna);
-+    escala_interna_ = altura == 540 ? 0.75f : altura == 360 ? 0.5f : 1.0f;  // 0 (automatic) starts at 720
-+    altura_interna_ = altura == 540 ? 540 : altura == 360 ? 360 : 720;
-+    auto_altura_ = altura_interna_ == 360 ? 540 : altura_interna_;
-+    if (altura != 720 && altura != 540 && altura != 360 && altura != 0) {
++    // 1080 (scale 1.5, experimental, docked only) if the memory check lets it; otherwise 720 as any invalid value.
++    const bool admite_1080 = altura == 1080 && Admite1080("no arranque");
++    interna_1080_recusada_ = altura == 1080 && !admite_1080 && deko::EnSobremesa();  // short of memory: not retried
++    escala_interna_ = admite_1080 ? 1.5f : altura == 540 ? 0.75f : altura == 360 ? 0.5f : 1.0f;  // 0 (automatic) starts at 720
++    altura_interna_ = admite_1080 ? 1080 : altura == 540 ? 540 : altura == 360 ? 360 : 720;
++    auto_altura_ = altura_interna_ == 360 ? 540 : altura_interna_ == 1080 ? 720 : altura_interna_;
++    if (altura != 1080 && altura != 720 && altura != 540 && altura != 360 && altura != 0) {
 +      REXLOG_WARN("[B3 Deko escala] b3_deko_resolucao_interna={} invalida: usando 720", altura);
 +    }
 +    REXLOG_INFO("[B3 Deko escala] interna={}x{} (fator {:.4f}){}; a saida e registrada no primeiro quadro",
@@ -3377,7 +5358,7 @@ index dcd46c7..4034031 100644
    AsegurarTrabajo();
    CrearVacias();
    REXLOG_INFO("[deko3d] destinos: etapa P2 (videos, menus y titulo): {} MB de subida por ranura, compresion de color "
-@@ -529,9 +822,31 @@ void RenderDk::AntesDe3D() {
+@@ -529,9 +826,31 @@ void RenderDk::AntesDe3D() {
  }
  
  bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
@@ -3411,7 +5392,7 @@ index dcd46c7..4034031 100644
      return false;
    }
    AsegurarTrabajo();
-@@ -540,9 +855,22 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -540,9 +859,22 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    if (!ubo) {
      return false;
    }
@@ -3436,7 +5417,7 @@ index dcd46c7..4034031 100644
    DkCmdBuf cmd = nucleo_.comandos();
    MarcarGpu(kGpuCopias);
    if (transferencia_sin_barrera_) {
-@@ -567,8 +895,9 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -567,8 +899,9 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    } else {
      dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
    }
@@ -3448,7 +5429,7 @@ index dcd46c7..4034031 100644
    dkCmdBufSetViewports(cmd, 0, &vp, 1);
    static const DkViewportSwizzle kIdentidad = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
                                                  DkSwizzle_PositiveW};
-@@ -589,17 +918,31 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -589,17 +922,31 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    ds.depthTestEnable = z;
    ds.depthWriteEnable = z;
    ds.depthCompareOp = DkCompareOp_Always;
@@ -3482,7 +5463,7 @@ index dcd46c7..4034031 100644
    dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
    ++copias_3d_;
    copia3d_pendiente_ = true;
-@@ -618,14 +961,83 @@ deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
+@@ -618,14 +965,83 @@ deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
    return s;
  }
  
@@ -3567,7 +5548,7 @@ index dcd46c7..4034031 100644
    DkImageLayoutMaker m;
    dkImageLayoutMakerDefaults(&m, nucleo_.dispositivo());
    m.type = tipo;
-@@ -647,12 +1059,16 @@ bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat for
+@@ -647,12 +1063,16 @@ bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat for
    dkImageInitialize(&imagen.imagen, &disposicion, imagen.memoria.bloque, imagen.memoria.offset);
    imagen.tipo = tipo;
    imagen.formato = formato;
@@ -3586,7 +5567,7 @@ index dcd46c7..4034031 100644
    imagen.serie = ++serie_imagenes_;
    return true;
  }
-@@ -675,7 +1091,7 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
+@@ -675,7 +1095,7 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
    AntesDe3D();
    DkCmdBuf cmd = nucleo_.comandos();
    const DkImageView vista = VistaCompleta(imagen.imagen);
@@ -3595,7 +5576,7 @@ index dcd46c7..4034031 100644
    imagen.alto_borrado = imagen.alto;
    imagen.banda_sucia = false;
    imagen.borrado_z = 1.0f;
-@@ -693,6 +1109,69 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
+@@ -693,6 +1113,69 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
    OlvidarEstado();
  }
  
@@ -3665,7 +5646,7 @@ index dcd46c7..4034031 100644
  ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch) {
    if (!pitch) {
      Rechazar(7, "destino de render con pitch 0");
-@@ -705,15 +1184,22 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
+@@ -705,15 +1188,22 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
    // The height from the pitch, as the Vulkan path (nfsmw_nativo_destinos.cpp, ObtenerDestino explains why).
    const uint32_t alto = std::min(kAltoMaximoDestino, std::max<uint32_t>(720, (pitch + 15) & ~15u));
    ImagenDk imagen;
@@ -3691,7 +5672,7 @@ index dcd46c7..4034031 100644
    ImagenDk& nueva = destinos_.emplace(clave, imagen).first->second;
    PrepararDestino(nueva);
    return &nueva;
-@@ -734,61 +1220,145 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
+@@ -734,61 +1224,145 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
    // compression: untested on deko3d, and copies broke it on nouveau (HowToDeko3d.md, section 5.10).
    static const uint32_t flags_z =
        DkImageFlags_UsageRender | (REXCVAR_GET(nfsmw_dk_compresion_profundidad) ? DkImageFlags_HwCompression : 0u);
@@ -3849,7 +5830,7 @@ index dcd46c7..4034031 100644
    if (frontal_.pendiente && direccion == frontal_.base) {
      MaterializarFrontal();  // a draw samples the front buffer: it gets the copy now
    } else if (frontal_obsoleta_ && direccion == frontal_obsoleta_) {
-@@ -801,11 +1371,47 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
+@@ -801,11 +1375,47 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
                    direccion);
      }
    }
@@ -3900,7 +5881,7 @@ index dcd46c7..4034031 100644
  }
  
  // ---- Copies (resolve and clear)
-@@ -884,7 +1490,74 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
+@@ -884,7 +1494,74 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
    return true;
  }
  
@@ -3975,7 +5956,7 @@ index dcd46c7..4034031 100644
    AsegurarTrabajo();
    EmitirCieloPendiente();  // a resolve reads the pass's target: the deferred sky goes in first
    const uint32_t control = reg.rb_copy_control;
-@@ -906,8 +1579,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -906,8 +1583,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
    }
    const uint32_t info_color = reg.rb_color_info[origen];
    const uint32_t formato_color = (info_color >> 16) & 0xF;
@@ -3986,7 +5967,7 @@ index dcd46c7..4034031 100644
      return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
    }
    int32_t x0, y0, x1, y1;
-@@ -925,33 +1598,56 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -925,33 +1602,56 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
      Resuelta* resuelta = nullptr;
      uint32_t dx = 0, dy = 0;
      uint32_t base_resuelta = 0;
@@ -4058,7 +6039,7 @@ index dcd46c7..4034031 100644
      }
      if (resuelta) {
        const uint32_t pedido_ancho = std::min(uint32_t(x1 - x0), destino_render->ancho - uint32_t(x0));
-@@ -966,8 +1662,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -966,8 +1666,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
                             (pedido_ancho * 4 >= cabe_ancho * 5 || pedido_alto * 4 >= cabe_alto * 5);
        // nfsmw_nativo_frontal_perezoso: the whole scene to the front buffer of the last Swap, not read back.
        const int32_t maximo_lectura = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
@@ -4070,7 +6051,7 @@ index dcd46c7..4034031 100644
        const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
                             !se_lee && x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == resuelta->imagen.ancho &&
                             alto == resuelta->imagen.alto;
-@@ -978,7 +1675,22 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -978,7 +1679,22 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
        }
        HacerBorradoPendiente(*destino_render);
        CompletarBanda(*destino_render, uint32_t(std::max(y1, 0)), false, 0);
@@ -4094,7 +6075,7 @@ index dcd46c7..4034031 100644
          if (frontal_.pendiente && frontal_.base != base_resuelta) {
            MaterializarFrontal();
          }
-@@ -986,42 +1698,146 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -986,42 +1702,146 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
          frontal_obsoleta_ = 0;
          resuelta->escrita = true;
          ++resuelta->imagen.version;
@@ -4258,7 +6239,7 @@ index dcd46c7..4034031 100644
    if (borrar_color && saltar_repetidos) {
      const uint64_t valor = uint64_t(reg.rb_color_clear) | (uint64_t(reg.rb_color_clear_lo) << 32);
      const auto it = borrado_previo_.find(destino_render->serie);
-@@ -1030,6 +1846,17 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -1030,6 +1850,17 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
        borrar_color = false;
      }
    }
@@ -4276,7 +6257,7 @@ index dcd46c7..4034031 100644
    if (borrar_color) {
      const uint64_t valor = uint64_t(reg.rb_color_clear) | (uint64_t(reg.rb_color_clear_lo) << 32);
      borrado_previo_[destino_render->serie] = {valor, dibujados_};
-@@ -1039,10 +1866,16 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -1039,10 +1870,16 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
      // Done when the target is next bound (EmpezarPase), resolved or painted, not now: the front buffer may still be
      // painted from it, and a later clear makes this one unnecessary.
      destino_render->borrado_pendiente = true;
@@ -4294,7 +6275,7 @@ index dcd46c7..4034031 100644
      } else {
        HacerBorradoPendiente(*destino_render);
      }
-@@ -1060,8 +1893,17 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
+@@ -1060,8 +1897,17 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
      return;
    }
    SombraMinimoAntesDeBorrar(*profundidad);
@@ -4313,7 +6294,7 @@ index dcd46c7..4034031 100644
    EstadoBorrado& previo = borrado_previo_[profundidad->serie];
    if (saltar_repetidos && previo.dibujos == dibujados_ && previo.valor == reg.rb_depth_clear) {
      ++borrados_saltados_;
-@@ -1072,9 +1914,11 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
+@@ -1072,9 +1918,11 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
    profundidad->borrado_z = float(reg.rb_depth_clear >> 8) / 16777215.0f;
    profundidad->borrado_estencil = uint8_t(reg.rb_depth_clear & 0xFF);
    profundidad->borrado_pendiente = true;
@@ -4326,7 +6307,7 @@ index dcd46c7..4034031 100644
      return;
    }
    HacerBorradoPendiente(*profundidad);
-@@ -1100,8 +1944,106 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
+@@ -1100,8 +1948,106 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
    OlvidarEstado();
  }
  
@@ -4434,7 +6415,7 @@ index dcd46c7..4034031 100644
    if (!area_util || !destino.alto_usado) {
      return destino.alto;
    }
-@@ -1112,12 +2054,15 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
+@@ -1112,12 +2058,15 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
    if (hasta <= desde) {
      return;
    }
@@ -4451,7 +6432,7 @@ index dcd46c7..4034031 100644
    } else {
      const float* c = destino.borrado_color;
      dkCmdBufClearColorFloat(cmd, i, DkColorMask_RGBA, c[0], c[1], c[2], c[3]);
-@@ -1167,12 +2112,8 @@ void RenderDk::MaterializarFrontal() {
+@@ -1167,12 +2116,8 @@ void RenderDk::MaterializarFrontal() {
    ImagenDk& destino = frontal_.resuelta->imagen;
    if (!Copiar3D(*frontal_.destino, 0, 0, frontal_.ancho, frontal_.alto, destino, 0, 0)) {
      AsegurarTrabajo();
@@ -4466,7 +6447,7 @@ index dcd46c7..4034031 100644
    }
  }
  
-@@ -1180,6 +2121,10 @@ void RenderDk::IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta) {
+@@ -1180,6 +2125,10 @@ void RenderDk::IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta) {
    std::swap(destino.imagen, resuelta.imagen);
    std::swap(destino.memoria, resuelta.memoria);
    std::swap(destino.serie, resuelta.serie);  // the descriptors go with their image
@@ -4477,7 +6458,7 @@ index dcd46c7..4034031 100644
    ++generacion_texturas_;  // the address now samples another image: the per-fetch cache looks again
    borrado_previo_.erase(destino.serie);  // the target holds another image: its last clear no longer holds
    OlvidarEstado();  // the bound target, if it was this one, is another image now
-@@ -1192,8 +2137,10 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
+@@ -1192,8 +2141,10 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
      return;
    }
    destino.contenido_invalido = false;
@@ -4488,7 +6469,7 @@ index dcd46c7..4034031 100644
        it->second.imagen.formato != destino.formato) {
      return;  // unknown where it went: the target keeps what it has, as the Vulkan path
    }
-@@ -1204,15 +2151,12 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
+@@ -1204,15 +2155,12 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
    AsegurarTrabajo();
    EmitirCieloPendiente();
    if (!Copiar3D(it->second.imagen, 0, 0, destino.ancho, destino.alto, destino, 0, 0)) {
@@ -4507,7 +6488,7 @@ index dcd46c7..4034031 100644
    destino.alto_borrado = destino.alto;  // all of it holds the texture's content now: no band left
    destino.banda_sucia = false;
    ++restauraciones_;
-@@ -1241,19 +2185,16 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+@@ -1241,19 +2189,16 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
    }
    const uint32_t pitch_destino = reg.rb_copy_dest_pitch & 0x3FFF;
    const uint32_t alto_destino = (reg.rb_copy_dest_pitch >> 16) & 0x3FFF;
@@ -4534,7 +6515,7 @@ index dcd46c7..4034031 100644
    if (!resuelta) {
      return;
    }
-@@ -1273,33 +2214,49 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+@@ -1273,33 +2218,49 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
    }
    HacerBorradoPendiente(*profundidad);
    CompletarBanda(*profundidad, uint32_t(std::max(y1, 0)), false, 0);
@@ -4594,7 +6575,7 @@ index dcd46c7..4034031 100644
    SombraMinimoResueltaEscrita(base);
    ++copias_;
    OlvidarEstado();
-@@ -1421,6 +2378,7 @@ bool RenderDk::SombraMinimoEnVezDeRestaurar(ImagenDk& destino) {
+@@ -1421,6 +2382,7 @@ bool RenderDk::SombraMinimoEnVezDeRestaurar(ImagenDk& destino) {
    destino.borrado_z = 1.0f;
    destino.borrado_estencil = 0;
    destino.borrado_pendiente = true;  // EmpezarPase clears it right after binding it
@@ -4602,7 +6583,7 @@ index dcd46c7..4034031 100644
    borrado_previo_.erase(destino.serie);  // not the game's clear: its next one cannot be skipped
    sm_ciclo_borrado_ = true;
    return true;
-@@ -1516,7 +2474,16 @@ const ImagenDk* RenderDk::CompaneraSombraCoches(bool capaz, uint32_t ps) {
+@@ -1516,7 +2478,16 @@ const ImagenDk* RenderDk::CompaneraSombraCoches(bool capaz, uint32_t ps) {
  void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, int32_t x0, int32_t y0, uint32_t dx,
                              uint32_t dy, uint32_t ancho, uint32_t alto) {
    const int32_t maximo = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
@@ -4620,7 +6601,7 @@ index dcd46c7..4034031 100644
      return;
    }
    LecturasRanura& l = lecturas_[trabajo_ % kRanuras];
-@@ -1558,7 +2525,10 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
+@@ -1558,7 +2529,10 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
    for (const LecturaDk& p : l.pendientes) {
      dkMemBlockFlushCpuCache(lectura_bloque_, p.offset, p.ancho * p.alto * 4);  // what the GPU wrote, not the cache
      const uint8_t* const datos = lectura_cpu_ + p.offset;
@@ -4632,7 +6613,7 @@ index dcd46c7..4034031 100644
      const uint32_t orden_copia = p.info & 0x7;  // Endian128: 0-3 as xenos::Endian
      const auto orden = orden_copia <= 3 ? static_cast<xenos::Endian>(orden_copia) : xenos::Endian::k8in32;
      // Each texel is a permutation of its 4 bytes (R/B swap plus GpuSwap), computed once with marked bytes.
-@@ -1670,6 +2640,29 @@ bool RenderDk::CrearShadersSalida() {
+@@ -1670,6 +2644,29 @@ bool RenderDk::CrearShadersSalida() {
    }
    const deko::Compilador::Resultado color = compilador_.Compilar(false, kFsCopiaColor);
    fs_copia_color_valido_ = color.ok && nucleo_.CargarShader(fs_copia_color_, color.dksh, "copia de color");
@@ -4662,7 +6643,7 @@ index dcd46c7..4034031 100644
    const deko::Compilador::Resultado z = compilador_.Compilar(false, kFsCopiaProfundidad);
    fs_copia_profundidad_valido_ = z.ok && nucleo_.CargarShader(fs_copia_profundidad_, z.dksh, "copia de profundidad");
    if (!fs_copia_color_valido_ || !fs_copia_profundidad_valido_) {
-@@ -1680,7 +2673,7 @@ bool RenderDk::CrearShadersSalida() {
+@@ -1680,7 +2677,7 @@ bool RenderDk::CrearShadersSalida() {
  }
  
  const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
@@ -4671,7 +6652,7 @@ index dcd46c7..4034031 100644
    if (rampas_[variante]) {
      return rampas_[variante].get();
    }
-@@ -1693,6 +2686,7 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
+@@ -1693,6 +2690,7 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
    glsl += (variante & kRampaGraduacion) ? "#define GRADUACION 1\n" : "#define GRADUACION 0\n";
    glsl += (variante & kRampaFxaa) ? "#define FXAA 1\n" : "#define FXAA 0\n";
    glsl += rampa_gamma_ ? "#define RAMPA 1\n" : "#define RAMPA 0\n";
@@ -4679,7 +6660,7 @@ index dcd46c7..4034031 100644
    glsl += kFsRampa;
    const uint64_t inicio = deko::AhoraNs();
    const deko::Compilador::Resultado r = compilador_.Compilar(false, glsl);
-@@ -1701,9 +2695,9 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
+@@ -1701,9 +2699,9 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
      REXLOG_ERROR("[deko3d] no se pudo compilar la variante {} del pixel shader de la salida: {}", variante, r.log);
      return nullptr;
    }
@@ -4691,7 +6672,7 @@ index dcd46c7..4034031 100644
    rampas_[variante] = std::move(shader);
    return rampas_[variante].get();
  }
-@@ -1720,14 +2714,33 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1720,14 +2718,33 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
      version_posproceso_ = version;
      RecalcularRampa();
    }
@@ -4727,7 +6708,7 @@ index dcd46c7..4034031 100644
    if (!fs) {
      fs = ShaderRampa(kRampaExacta);
    }
-@@ -1757,10 +2770,20 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1757,10 +2774,20 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
      return false;
    }
    const int32_t desplazamiento[4] = {0, 0, 0, 0};
@@ -4749,7 +6730,7 @@ index dcd46c7..4034031 100644
    const uint32_t ranura = VistaDe(origen, 0x688 /* RGBA */, 0x688);
    const uint32_t ranura_tabla = VistaDe(rampa_tabla_, 0x688, 0x688);
    DkCmdBuf cmd = nucleo_.comandos();
-@@ -1798,11 +2821,28 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1798,11 +2825,28 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
    dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
    dkCmdBufBindTexture(cmd, DkStage_Fragment, 1, dkMakeTextureHandle(ranura_tabla, 0));
    dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
@@ -4778,7 +6759,7 @@ index dcd46c7..4034031 100644
    RexSwitchPerfCount(0);  // the profiler's "juego N fps"
    const uint64_t ahora = deko::AhoraNs();
    if (ultimo_swap_ns_) {
-@@ -1831,20 +2871,29 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1831,20 +2875,29 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    ultimo_frontal_ = base;  // nfsmw_nativo_frontal_perezoso: the next resolve here may go to the Swap directly
    // The front buffer is still in its render target (and the texture was not written): painted from there.
    const bool desde_destino = frontal_.pendiente && frontal_.base == base;
@@ -4810,7 +6791,7 @@ index dcd46c7..4034031 100644
    const uint32_t ancho_origen = desde_destino ? frontal_.ancho : (origen ? origen->ancho : 0);
    const uint32_t alto_origen = desde_destino ? frontal_.alto : (origen ? origen->alto : 0);
    if (!origen) {
-@@ -1852,15 +2901,34 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1852,15 +2905,41 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    } else if (presentador) {
      const uint32_t w = std::min(ancho ? ancho : ancho_origen, ancho_origen);
      const uint32_t h = std::min(alto ? alto : alto_origen, alto_origen);
@@ -4826,6 +6807,13 @@ index dcd46c7..4034031 100644
 +    if (REXCVAR_GET(b3_deko_ampliador) > 0 && !hooks_.Fxaa() && ancho_cadena && alto_cadena &&
 +        uint64_t(ancho_cadena) * 9 == uint64_t(alto_cadena) * 16 && FisicoCeil(h, origen->escala) < alto_cadena &&
 +        w * 9 == h * 16) {
++      ancho_m = ancho_cadena;
++      alto_m = alto_cadena;
++    }
++    // 0.1.47: a scene above the guest's size (internal 1080, scale 1.5) is painted at the swapchain's size too
++    // (whatever the upscaler or FXAA): at 1280x720 the output pass would throw its extra pixels away.
++    if (origen->escala > 1.0f && ancho_cadena && alto_cadena &&
++        uint64_t(ancho_cadena) * 9 == uint64_t(alto_cadena) * 16 && w * 9 == h * 16) {
 +      ancho_m = ancho_cadena;
 +      alto_m = alto_cadena;
 +    }
@@ -4847,7 +6835,7 @@ index dcd46c7..4034031 100644
            MaterializarFrontal();
            fuente = TexturaResuelta(base);
          } else {
-@@ -1876,6 +2944,10 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1876,6 +2955,10 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    if (!llamada) {
      CerrarTrabajo();
    }
@@ -4858,7 +6846,7 @@ index dcd46c7..4034031 100644
    ++fotograma_;
    geometria_.NuevoFotograma(fotograma_);
    PerfilAlCambiarDeFotograma();
-@@ -1887,9 +2959,175 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1887,9 +2970,223 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    SoltarTexturasSiHaceFalta();
    GuardarCacheSiHaceFalta(false);
    InformePeriodico();
@@ -4874,11 +6862,51 @@ index dcd46c7..4034031 100644
 +uint32_t RenderDk::AlturaInternaDeseada() const {
 +  const int32_t pedido = REXCVAR_GET(b3_deko_resolucao_interna);
 +  uint32_t altura = pedido == 0 ? auto_altura_ : (pedido == 540 || pedido == 360) ? uint32_t(pedido) : 720u;
++  // 0.1.47: 1080 (scale 1.5) is experimental and docked only; refused for memory (interna_1080_recusada_) or in
++  // handheld it is 720, as before.
++  if (pedido == 1080 && !interna_1080_recusada_ && deko::EnSobremesa()) {
++    altura = 1080u;
++  }
 +  // The internal resolution never exceeds the output's height.
 +  if (alto_salida_ && altura > alto_salida_) {
 +    altura = alto_salida_ >= 720 ? 720u : alto_salida_ >= 540 ? 540u : 360u;
 +  }
 +  return altura;
++}
++
++float RenderDk::EscalaDeAltura(uint32_t altura) {
++  return altura == 1080 ? 1.5f : altura == 540 ? 0.75f : altura == 360 ? 0.5f : 1.0f;
++}
++
++bool RenderDk::Admite1080(const char* cuando) {
++  if (!deko::EnSobremesa()) {
++    REXLOG_INFO("[B3 Deko escala] interna 1080 ({}): so no dock; portatil usa 720", cuando);
++    return false;
++  }
++  // What the scaled images (EDRAM targets, resolved textures, the blur's) take at 1.5: today's, made at the current
++  // scale e, times (1.5 / e)^2 (the tiny unscaled ones and the CPU-read resolves are counted too: an overestimate).
++  // Before the first frame there are none yet: 256 MB, about 2.25x this game's targets at 720.
++  uint64_t actuales = 0;
++  for (const auto& [clave, imagen] : destinos_) actuales += imagen.memoria.bytes;
++  for (const auto& [clave, imagen] : profundidades_) actuales += imagen.memoria.bytes;
++  for (const auto& [clave, r] : resueltas_) actuales += r.imagen.memoria.bytes;
++  for (const ImagenDk& d : desfoque_b3_) {
++    if (d.viva) actuales += d.memoria.bytes;
++  }
++  const double e = double(escala_interna_);
++  const uint64_t estimado = std::max<uint64_t>(256ull << 20, uint64_t(double(actuales) * (2.25 / (e * e))));
++  constexpr uint64_t kMargen = 192ull << 20;  // the rest of the process (guest allocations, threads, the presenter)
++  const uint64_t libre = deko::MemoriaLibreHeap();
++  if (libre < estimado + kMargen) {
++    REXLOG_WARN("[B3 Deko escala] interna 1080 recusada ({}): memoria livre {} MB < {} MB estimados + {} MB de margem; "
++                "usando 720",
++                cuando, libre >> 20, estimado >> 20, kMargen >> 20);
++    return false;
++  }
++  REXLOG_INFO("[B3 Deko escala] interna 1080 (EXPERIMENTAL, fator 1.5) aceita ({}): memoria livre {} MB, estimados {} MB "
++              "para os alvos escalados",
++              cuando, libre >> 20, estimado >> 20);
++  return true;
 +}
 +
 +void RenderDk::ControlarEscalaInterna() {
@@ -4931,18 +6959,26 @@ index dcd46c7..4034031 100644
 +      }
 +    }
 +  } else {
-+    auto_altura_ = altura_interna_ == 360 ? 540 : altura_interna_;
++    // (The automatic mode is 720/540 only: from 1080 it starts at 720.)
++    auto_altura_ = altura_interna_ == 360 ? 540 : altura_interna_ == 1080 ? 720 : altura_interna_;
 +    auto_abajo_ = auto_arriba_ = 0;
 +    auto_abajo_ns_ = auto_arriba_ns_ = 0;
 +  }
-+  const uint32_t deseada = AlturaInternaDeseada();
++  if (pedido != 1080) {
++    interna_1080_recusada_ = false;  // a new request for 1080 checks the memory again
++  }
++  uint32_t deseada = AlturaInternaDeseada();
++  if (deseada == 1080 && altura_interna_ != 1080 && !Admite1080("troca ao vivo")) {
++    interna_1080_recusada_ = true;  // until the cvar leaves 1080: not checked again every frame
++    deseada = AlturaInternaDeseada();
++  }
 +  if (deseada != altura_interna_) {
 +    AplicarEscalaInterna(deseada, pedido == 0 ? "automatica" : (deseada != uint32_t(pedido) ? "limitada pela saida" : "cvar"));
 +  }
 +}
 +
 +void RenderDk::AplicarEscalaInterna(uint32_t altura, const char* motivo) {
-+  const float nueva = altura == 540 ? 0.75f : altura == 360 ? 0.5f : 1.0f;
++  const float nueva = EscalaDeAltura(altura);
 +  const uint32_t anterior = altura_interna_;
 +  const uint64_t inicio = deko::AhoraNs();
 +  altura_interna_ = altura;
@@ -5034,7 +7070,7 @@ index dcd46c7..4034031 100644
  // ---- The DKSH cache file and the report
  
  void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
-@@ -1899,29 +3137,43 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
+@@ -1899,29 +3196,43 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
    }
    cache_sucia_ = false;
    cache_guardada_ns_ = ahora;
@@ -5098,7 +7134,7 @@ index dcd46c7..4034031 100644
    };
    // One write at a time, on a thread that is joined, never detached: libnx has no pthread_detach, and
    // std::thread::detach() throws (std::system_error, "Function not implemented") and ends the process.
-@@ -1931,7 +3183,7 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
+@@ -1931,7 +3242,7 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
    if (ya) {
      escribir();
    } else {
@@ -5107,7 +7143,7 @@ index dcd46c7..4034031 100644
    }
  }
  
-@@ -2224,7 +3476,86 @@ void RenderDk::InformeDelPerfil() {
+@@ -2224,7 +3535,86 @@ void RenderDk::InformeDelPerfil() {
  
  // ---- Statistics for the system's report
  
@@ -5195,7 +7231,7 @@ index dcd46c7..4034031 100644
  
  EstadisticasDibujos RenderDk::EstadisticasDeDibujos() const {
    EstadisticasDibujos e;
-@@ -2286,4 +3617,409 @@ std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* prov
+@@ -2286,4 +3676,409 @@ std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* prov
    return std::make_unique<RenderDk>(*proveedor, memoria, hooks);
  }
  
@@ -5606,7 +7642,7 @@ index dcd46c7..4034031 100644
 +
  }  // namespace rex::x360
 diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
-index e3fb6f1..ca752da 100644
+index e3fb6f1..f1eb71d 100644
 --- a/src/x360/deko/dibujos.cpp
 +++ b/src/x360/deko/dibujos.cpp
 @@ -12,7 +12,10 @@
@@ -6499,7 +8535,19 @@ index e3fb6f1..ca752da 100644
            g_.mezclas[i] = mezclas[i];
          }
        }
-@@ -1739,8 +2137,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1685,6 +2083,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+       dkCmdBufSetBlendConst(cmd, mezcla_constante[0], mezcla_constante[1], mezcla_constante[2], mezcla_constante[3]);
+       std::memcpy(g_.mezcla_constante, mezcla_constante, sizeof(mezcla_constante));
+     }
++    // 0.1.47: above the guest's size (internal 1080, pass scale 1.5) a host pixel spans 1/1.5 of a guest pixel, so the
++    // slope term (per host pixel) shrinks by that much: scaled back up to the guest's bias. Below 1 left as before.
++    if (con_sesgo && pase_escala_ > 1.0f) {
++      sesgo[1] *= pase_escala_;
++    }
+     // No clamp, as Mesa programs it (HowToDeko3d.md, section 6, item 8); deko3d doubles the units like nvc0.
+     if (con_sesgo && (!g_.valido || std::memcmp(sesgo, g_.sesgo, sizeof(sesgo)) != 0)) {
+       dkCmdBufSetDepthBias(cmd, sesgo[0], 0.0f, sesgo[1]);
+@@ -1739,8 +2142,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    std::array<DkBufExtents, 16> bufers{};
    for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
      const Origen& origen = origenes[b];
@@ -6511,7 +8559,7 @@ index e3fb6f1..ca752da 100644
        const deko::AlmacenGeometria::Resultado en_almacen = geometria_.Buscar(
            origen.datos, origen.bytes, uint64_t(origen.orden), origen.bytes, [&](uint8_t* destino, uint32_t&, uint32_t&) {
              CopiarVertices(TrabajoCopia{origen.datos, destino, origen.bytes / 4, origen.orden});
-@@ -1754,7 +2154,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1754,7 +2159,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      // The same guest range in the same order already copied in this work slot: bound again, not copied.
      const uint64_t direccion = uint64_t(reinterpret_cast<uintptr_t>(origen.datos));
      uint64_t ya = 0;
@@ -6520,7 +8568,7 @@ index e3fb6f1..ca752da 100644
        bufers[b] = {DkGpuAddr(ya), origen.bytes};
        continue;
      }
-@@ -1762,8 +2162,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1762,8 +2167,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      if (!s) {
        return Rechazar(13, "sin sitio en el anillo de subida");
      }
@@ -6535,7 +8583,7 @@ index e3fb6f1..ca752da 100644
      bufers[b] = {s.gpu, origen.bytes};
    }
    // One call per buffer. deko3d 0.5.0's dkCmdBufBindVtxBuffers reserves 5 words per buffer and writes 6: with n
-@@ -1773,6 +2177,63 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1773,6 +2182,63 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
      dkCmdBufBindVtxBuffers(cmd, uint32_t(b), &bufers[b], 1);
    }
@@ -6599,7 +8647,7 @@ index e3fb6f1..ca752da 100644
    cortar_etapa(3);
    DkGpuAddr dir_indices = 0;
    if (con_indices) {
-@@ -1797,9 +2258,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1797,9 +2263,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      dkCmdBufBindIdxBuffer(cmd, indices_de_16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint32, dir_indices);
    }
    cortar_etapa(4);
@@ -6613,7 +8661,7 @@ index e3fb6f1..ca752da 100644
      if (bloques_trabajo_ != trabajo_) {
        // A new work: the blocks start as the registers are now (the GPU has not started this work: CPU writes).
        const deko::Subida v = nucleo_.Reservar(kUboBytesVs, DK_UNIFORM_BUF_ALIGNMENT);
-@@ -1868,22 +2331,38 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1868,22 +2336,38 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      constantes_trabajo_ = trabajo_;
      constantes_vs_generacion_ = constantes_ps_generacion_ = UINT64_MAX;
    }
@@ -6656,7 +8704,7 @@ index e3fb6f1..ca752da 100644
      constantes_ps_gpu_ = s.gpu;
      constantes_ps_generacion_ = p.generacion_constantes_ps;
      constantes_ps_bytes_ = bytes_ps;
-@@ -1915,6 +2394,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1915,6 +2399,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    }
  
    // --- The draw
@@ -6674,7 +8722,7 @@ index e3fb6f1..ca752da 100644
    if (es_cielo) {
      // Deferred: its state is what g_ holds now; its buffers stay in this slot's ring until the work is submitted, and
      // the work is not closed with it pending (CerrarTrabajo emits it).
-@@ -1987,6 +2477,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1987,6 +2482,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
          }
          dkCmdBufReportCounter(cmd, DkCounter_Timestamp, marca_vez);
        }
@@ -6687,7 +8735,7 @@ index e3fb6f1..ca752da 100644
        if (con_indices) {
          dkCmdBufDrawIndexed(cmd, primitiva, n_indices, 1, 0, -int32_t(vmin), 0);
        } else {
-@@ -2018,6 +2514,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -2018,6 +2519,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      }
      ++dibujos_en_pase_;
    }

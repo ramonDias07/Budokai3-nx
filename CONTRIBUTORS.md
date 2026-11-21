@@ -2,7 +2,7 @@
 
 - **Ramon (ramonDias07)** — manutenção do projeto, testes em Switch físico e validação das releases.
 - **OpenAI Codex** — implementação e depuração do port, ferramentas de compilação e documentação em colaboração com Ramon.
-- **Claude (Anthropic)** — modelos Claude Opus, Sonnet e Haiku, via Claude Code: implementação, depuração e documentação das versões 0.1.41 a 0.1.46, em colaboração com Ramon.
+- **Claude (Anthropic)** — modelos Claude Opus, Sonnet e Haiku, via Claude Code: implementação, depuração e documentação das versões 0.1.41 a 0.1.50, em colaboração com Ramon.
 
 ## Projetos cujo trabalho foi usado
 

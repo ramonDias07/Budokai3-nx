@@ -73,6 +73,8 @@ REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
 REXCVAR_DEFINE_BOOL(b3_gpu_boost, false, "Budokai 3",
                     "Perfil oficial de GPU 460.8 MHz (apm) so no portatil; no dock nao faz nada. Desligar restaura o "
                     "perfil anterior. Ao vivo.");
+REXCVAR_DEFINE_BOOL(b3_gpu_boost_ram1600, true, "Budokai 3",
+                    "GPU boost uses the official handheld mode GPU 460 + RAM 1600 (fixes audio crackle at stock CPU). Live.");
 
 REXCVAR_DEFINE_BOOL(b3_deko_copia_final, true, "Budokai 3",
                     "Usa a imagem anterior ao FXAA na copia final do Budokai 3.");
@@ -80,7 +82,8 @@ REXCVAR_DEFINE_BOOL(b3_deko_copia_final, true, "Budokai 3",
 namespace b3 {
 
 void PedirResolucaoInterna(int altura) {
-  if (altura != 0 && altura != 720 && altura != 540 && altura != 360) {
+  // 1080: experimental, docked only (the renderer falls back to 720 in handheld or short of memory).
+  if (altura != 0 && altura != 1080 && altura != 720 && altura != 540 && altura != 360) {
     REXLOG_WARN("[B3 Deko escala] PedirResolucaoInterna({}) invalida: ignorada", altura);
     return;
   }
@@ -100,15 +103,37 @@ bool AplicarGpuBoost(bool ligar) {
     if (g_gpu_boost_ocupado.load()) {
       return false;
     }
-    if (RexSwitchApmAtivo()) {
-      RexSwitchApmRestaurar();
-      REXLOG_INFO("[B3 gpu boost] desligado: perfil anterior restaurado");
+    if (!RexSwitchApmAtivo()) {
+      return true;  // nothing to restore
     }
+    if (g_gpu_boost_ocupado.exchange(true)) {
+      return false;
+    }
+    // Restaurar sleeps ~0.5 s and reads clkrst: keep it off the swap thread (same pthread mechanism as the on path).
+    pthread_t hilo_off;
+    const int rc_off = pthread_create(&hilo_off, nullptr, [](void*) -> void* {
+      if (RexSwitchApmRestaurar() == 1) {
+        REXLOG_INFO("[B3 gpu boost] desligado: perfil anterior restaurado");
+      } else {
+        REXLOG_WARN("[B3 gpu boost] desligado, mas o perfil anterior foi RECHAZADO pelo apm (ver [apm] no log)");
+      }
+      g_gpu_boost_ocupado.store(false);
+      return nullptr;
+    }, nullptr);
+    if (rc_off != 0) {
+      REXLOG_WARN("[B3 gpu boost] pthread_create falhou ({}): boost nao restaurado", rc_off);
+      g_gpu_boost_ocupado.store(false);
+      return false;
+    }
+    pthread_detach(hilo_off);
     return true;
   }
   if (dock) {
     REXLOG_INFO("[B3 gpu boost] ignorado: console no dock (so vale no portatil)");
     return false;
+  }
+  if (g_gpu_boost_ocupado.load()) {
+    return false;  // an apply or a restore is still running in the background; retry next tick
   }
   if (RexSwitchApmAtivo()) {
     return true;
@@ -121,6 +146,7 @@ bool AplicarGpuBoost(bool ligar) {
   // pthread, not std::thread: std::thread throws std::system_error "Function not implemented" on this toolchain
   // (the 0.1.43 NO OVERCLOCK crash, rex_crash.log: std::terminate in AplicarGpuBoost).
   pthread_t hilo;
+  RexSwitchApmPermitirRam1600(REXCVAR_GET(b3_gpu_boost_ram1600) ? 1 : 0);
   const int rc = pthread_create(&hilo, nullptr, [](void*) -> void* {
     RexSwitchApmPedirGpuMhz(460);
     RexSwitchApmAplicar();
@@ -376,7 +402,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     }
     render_ = std::make_unique<x360::RenderDk>(*provider, memory_);
     diagnostic_ = REXCVAR_GET(b3_deko_diagnostico);
-    REXLOG_INFO("[B3 Deko build] 0.1.46: boost sem travar, sombra sem listras (sesgo), audio sem estalos, padroes do perfil PERFORMANCE");
+    REXLOG_INFO("[B3 Deko build] 0.1.50: achievements detail card (A opens, B back); audio from 0.1.49 (one Audio Worker per client)");
     direct_composite_ = REXCVAR_GET(b3_deko_copia_final);
     REXLOG_INFO("Xenos/Deko: copia final sem FXAA {}", direct_composite_ ? "ativada" : "desativada");
     if (diagnostic_) {
@@ -986,12 +1012,23 @@ class DekoCommandProcessor final : public CommandProcessor {
     if (swaps_ % 30 != 1) return;
     const bool dock = rex::ui::switch_saltynx::ModoBase(appletGetOperationMode() == AppletOperationMode_Console);
     const bool quer = REXCVAR_GET(b3_gpu_boost) && !dock;
+    const bool ram = REXCVAR_GET(b3_gpu_boost_ram1600);
+    if (quer && gpu_boost_estado_ && RexSwitchApmAtivo() && ram != gpu_boost_ram_aplicada_) {
+      // The RAM 1600 cvar changed while the boost is on: restore now, and the next tick (30 swaps later) applies again.
+      if (AplicarGpuBoost(false)) {
+        REXLOG_INFO("[B3 gpu boost] b3_gpu_boost_ram1600 mudou ({}): boost reaplicado no proximo ciclo", ram);
+        gpu_boost_estado_ = false;
+      }
+      return;
+    }
     if (quer == gpu_boost_estado_) return;
     if (AplicarGpuBoost(quer)) {
       gpu_boost_estado_ = quer;
+      if (quer) gpu_boost_ram_aplicada_ = ram;
     }
   }
   bool gpu_boost_estado_ = false;
+  bool gpu_boost_ram_aplicada_ = false;
 
   void UpdateOptions() {
     const uint32_t options = options_.load(std::memory_order_relaxed);

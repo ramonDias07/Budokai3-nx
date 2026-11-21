@@ -21,7 +21,7 @@ Na janela de 30,8 FPS, o desenho da cena consumiu **19,91 ms** e as cópias cons
 
 ## B3deko 0.1.44 e 0.1.46
 
-A partir da 0.1.42 o alvo é manter uma velocidade estável com os **clocks padrão do Switch**. Os números abaixo vêm de logs de luta da **0.1.44** no modo portátil, com **CPU a 1.020 MHz, GPU a 307 MHz e RAM a 1.331 MHz**, sem o modo oficial de GPU de 460 MHz, exceto onde indicado. A 0.1.46 ainda não foi medida: a versão não foi testada no console.
+A partir da 0.1.42 o alvo é manter uma velocidade estável com os **clocks padrão do Switch**. Os números abaixo vêm de logs de luta da **0.1.44** no modo portátil, com **CPU a 1.020 MHz, GPU a 307 MHz e RAM a 1.331 MHz**, sem o modo oficial de GPU de 460 MHz, exceto onde indicado. A 0.1.46 não foi medida; veja a seção da 0.1.49 mais abaixo.
 
 | Teto (GAME TIME) | Condições | FPS | GPU por quadro |
 | --- | --- | ---: | ---: |
@@ -40,4 +40,30 @@ Linha de base da **0.1.43**, com o modo oficial de GPU a **460 MHz**:
 
 O tempo de GPU por quadro depende do clock da GPU, de modo que valores medidos a 307 MHz e a 460 MHz não se comparam diretamente. O tempo de jogo em tempo real (delta time) separa a velocidade da simulação da taxa de apresentação; veja [Referências](referencias.md).
 
-Em testes com o perfil NO OVERCLOCK (CPU 1.020 MHz, RAM 1.331 MHz) havia chiado no áudio, que sumia com RAM a 1.600 MHz. A 0.1.46 acrescenta uma rampa anti-estalo e um colchão de áudio maior nesse perfil. Isso ainda precisa de teste no console.
+Em testes com o perfil NO OVERCLOCK (CPU 1.020 MHz, RAM 1.331 MHz) havia chiado no áudio, que sumia com RAM a 1.600 MHz. A 0.1.46 acrescentou uma rampa anti-estalo e um colchão de áudio maior nesse perfil. A causa real do chiado com a CPU de fábrica foi corrigida na 0.1.49 (veja abaixo).
+
+## B3deko 0.1.49
+
+Logs de luta no modo portátil, perfil PERFORMANCE, **CPU 1.020 MHz (padrão)** e GPU boost no modo oficial (**GPU 460,8 MHz + RAM 1.600 MHz**, `0x92220007`). Esta versão foi testada no Switch físico.
+
+| Teto (GAME TIME) | Janelas de 10 s | FPS médio | GPU por quadro | Desenhos por quadro |
+| --- | ---: | ---: | ---: | ---: |
+| 40 FPS | 86 | 39,8 | 20,0 ms (máximo 23,1 ms) | cerca de 318 |
+
+Referência da 0.1.46: teto 40 a 307 MHz deu 40,0 FPS com GPU de 20 a 23 ms; teto 45 com boost deu 44 a 45 FPS com GPU de 16 a 22 ms.
+
+### Áudio
+
+Pedidos de áudio sem dados (faltas) por janela de 10 s, com a CPU a 1.020 MHz:
+
+| Versão | Faltas por 10 s |
+| --- | ---: |
+| 0.1.43 | cerca de 106 |
+| 0.1.44 | cerca de 92 |
+| 0.1.46 | 54 a 250 |
+| 0.1.48 | 60 a 260 |
+| 0.1.49 | 1,3 em média (129 janelas), 0 amostras saturadas |
+
+Com a CPU a 1.428 MHz o áudio já saía limpo (0 faltas) nas versões antigas. A causa nas versões anteriores à 0.1.49: os dois mixers do jogo (música e efeitos), com cerca de 2,8 ms cada, eram chamados em fila por um único Audio Worker e passavam dos 5,33 ms de cada quadro de áudio com a CPU de fábrica. A 0.1.49 usa um Audio Worker por cliente e os mixers rodam em paralelo.
+
+A 0.1.50, a saída 1440P e a resolução interna 1080P do dock não foram medidas nem testadas no console.

@@ -27,7 +27,7 @@ b3_perfil = "performance"
 # Keys: tempo, interna, saida, sombras, desfoque, bloom, dof, boost, copias, z.
 b3_perfil_default = ""
 b3_perfil_performance = ""
-b3_perfil_nooverclock = "tempo=40;saida=720;dof=720"
+b3_perfil_nooverclock = ""
 # Game time: 60 (original timing), 55, 50, 45, 40, 35 or 30 FPS. Live.
 b3_tempo_jogo_fps = 40
 # Used internally by the game time (60 -> speed 0 and limit 60; otherwise speed 1 and limit = FPS).
@@ -51,6 +51,8 @@ b3_deko_pular_resolve_repetido = false
 # Relaxed vsync with a fixed swap interval (no 33 -> 67 ms spikes). Live.
 b3_deko_vsync_relaxado = true
 # b3_gpu_boost is decided by the profile (DEFAULT and PERFORMANCE on, NO OVERCLOCK off); not set here.
+# b3_gpu_boost_ram1600: o perfil decide; NO OVERCLOCK desliga.
+b3_gpu_boost_ram1600 = true
 # Treat invalid (type 0) fetch constants as textures; needed for fighter shadows.
 b3_deko_fetch_invalido = true
 # Fighter shadow depth bias (0 = original, 16..256). Stops stripe flicker on the ground. Live.
