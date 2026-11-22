@@ -60,6 +60,10 @@ Capturas feitas no Switch com a build 0.1.38, mostrando o layout de Dragon Rush 
 
 ![Ataque durante a sequência do Dragon Rush](docs/screenshots/combate.jpg)
 
+Menu principal com a tradução PT-BR opcional (tradução de TheRalf), capturado no Switch em 22/11/2026.
+
+![Menu principal traduzido para o português](docs/screenshots/traducao-ptbr-menu.jpg)
+
 ## Contribuições
 
 Sugestões e pull requests de otimização são bem-vindos. Se você testar no console, conte o que funcionou e abra uma issue caso encontre um problema. Inclua a versão do port, a cena, o perfil gráfico, os clocks do console e, se possível, o trecho relevante do log. Para propor uma otimização, inclua medições antes e depois na mesma cena. [Issues](https://github.com/ramonDias07/Budokai3-nx/issues) · [Contribuidores](CONTRIBUTORS.md)
