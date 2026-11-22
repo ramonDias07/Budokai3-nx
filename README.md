@@ -2,24 +2,25 @@
 
 Port homebrew não oficial de **Dragon Ball Z: Budokai 3 HD** para Nintendo Switch, baseado na edição Xbox 360 de *Dragon Ball Z: Budokai HD Collection*. O ReXGlue recompila o código PowerPC do jogo para ARM64. O port processa os comandos gráficos Xenos e renderiza com Deko3D.
 
-[Release v0.1.50](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.50) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
+[Release v0.1.56](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.56) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
 
 Para começar, baixe **Source code** na release. No Windows, instale o devkitPro e dê dois cliques em `install.bat`: ele confere as ferramentas, pede o seu dump **USA/Japan de Xbox 360**, gera o `B3.nro` e monta a pasta para o SD. O [guia de compilação](docs/build.md) explica o jeito fácil e os passos à mão.
 
 ## Estado do port
 
-Destaques da **v0.1.50** (B3deko 0.1.47 a 0.1.50):
+Destaques da **v0.1.56** (B3deko 0.1.51 a 0.1.56):
 
-- **40 FPS estáveis nas lutas** com a CPU de fábrica do Switch (1.020 MHz).
-- **Áudio limpo:** o chiado nas caudas agudas de efeitos foi diagnosticado e corrigido (um Audio Worker por cliente de som).
-- **Perfis** DEFAULT, PERFORMANCE e NO OVERCLOCK, com GAME TIME de 30 a 60 FPS.
-- **GPU boost oficial** (GPU 460,8 MHz + RAM 1.600 MHz, sem overclock) que volta ao clock original ao desligar.
-- **Conquistas com ícones** do próprio jogo, lidos do seu XEX, com cartão de detalhe.
-- **Dock:** interna 1080P e saída 1440P, ambas experimentais.
+- **Instalador de um clique para Windows** (`install.bat`): confere e instala as ferramentas, pede a ISO e gera a pasta para o SD.
+- **Tradução PT-BR opcional**, a tradução de fãs de **TheRalf** para o Budokai 3 de PS2, convertida no seu PC a partir dos seus discos e ligada pela opção LANGUAGE do menu rápido. [Como gerar](docs/traducao-ptbr.md)
+- **Legenda do menu rápido** no menu principal do jogo: `(+)+(-) : Quick Menu`.
+- **Efeitos de especiais:** os dois shaders de efeito que faltavam (feixe e fogo) estão no pacote e no cache pré-compilado.
+- **Pacote de desempenho** (0.1.56): logs periódicos e perfil de GPU desligados por padrão, busca de shader sem cópia, constantes por push e subida direta de texturas.
+
+Continuam da v0.1.50: 40 FPS nas lutas com a CPU de fábrica, áudio limpo, perfis DEFAULT, PERFORMANCE e NO OVERCLOCK, GPU boost oficial, conquistas com ícones e opções experimentais de dock.
 
 | Área | Estado |
 | --- | --- |
-| Switch físico | Testadas no console: 0.1.47 (boost segue o perfil, menu de conquistas com ícones), 0.1.48 (áudio melhorou muito) e 0.1.49 (chiado corrigido). **Ainda não testados:** cartão de detalhe da conquista (0.1.50), interna 1080P e saída 1440P no dock, e os novos padrões do NO OVERCLOCK. |
+| Switch físico | Testadas no console até a 0.1.49 (boost, conquistas com ícones, áudio limpo). **Ainda não testadas no console:** as novidades da 0.1.51 à 0.1.56 (legenda, shaders de efeito, tradução PT-BR e pacote de desempenho), o cartão de detalhe da conquista e as opções de dock. Se a 0.1.56 mostrar erro de textura ou de efeito, desligue `nfsmw_dk_subida_directa` ou `nfsmw_dk_compartidas_push` no `budokai3.toml`. |
 | Desempenho | Luta a 40 FPS, modo portátil, CPU 1.020 MHz, boost GPU 460 MHz + RAM 1.600 MHz: **39,8 FPS** de média, GPU de **20,0 ms** por quadro. Faltas de áudio por 10 s com a CPU de fábrica: 54 a 260 (0.1.46 e 0.1.48) contra **1,3** na 0.1.49. [Medições e método](docs/performance.md) |
 
 ## O que você precisa
@@ -83,13 +84,17 @@ O jogo, os personagens, a arte, a música, as vozes e o design pertencem a essas
 - **FurryLilManChild**, **ChanseyIsTheBest**, **masterspike52** e colaboradores pelos projetos LoS1-nx, SA2-nx e reNut. O extrator XDVDFS e a adaptação SPIR-V para GLSL/Deko vieram da árvore do LoS1-nx. [LoS1-nx](https://github.com/FurryLilManChild/LoS1-nx) · [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx)
 - **hedge-dev**, **devkitPro** e **Khronos** pelas ferramentas usadas na tradução de shaders. [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) · [uam](https://github.com/devkitPro/uam) · [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)
 
+### Tradução PT-BR
+
+- **TheRalf** pela tradução de fãs em português do Brasil do *Dragon Ball Z: Budokai 3* de PS2 (patch v1.2). Ela foi feita à moda antiga, redesenhando à mão diálogos, menus, cápsulas e gráficos, e levou muito tempo. O mérito da tradução é todo dele. O port só converte esse trabalho para a versão HD, no PC de quem joga, e não distribui a tradução nem os arquivos do jogo.
+
 Veja de onde veio cada parte e como outros ports tratam instalação e dados originais em [Referências](docs/referencias.md).
 
 ## English overview
 
-**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.50** builds on 0.1.46 and adds stable 40 FPS fights at stock CPU clocks, a fix for crackling audio (one Audio Worker per sound client), an official GPU boost mode, achievements with in-game icons, and experimental 1080P/1440P dock options. Versions 0.1.47 to 0.1.49 were tested on a physical Switch; the 0.1.50 achievement detail card and the dock resolutions were not.
+**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.56** builds on 0.1.50 (40 FPS fights at stock CPU clocks, clean audio, official GPU boost, achievements with in-game icons) and adds a one-click Windows installer (`install.bat`), an optional Brazilian Portuguese translation (the PS2 fan translation by **TheRalf**, all credit to him; converted locally from your own discs, never distributed), an on-screen quick-menu legend, the two missing special-effect shaders and a performance pack. Versions up to 0.1.49 were tested on a physical Switch; the 0.1.51–0.1.56 changes were not yet.
 
-Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. On Windows, install devkitPro and double-click `install.bat`: it checks the tools, asks for your ISO and builds the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.50) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
+Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. On Windows, install devkitPro and double-click `install.bat`: it checks the tools, asks for your ISO and builds the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.56) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
 **Original game and legal notice.** *Dragon Ball Z: Budokai 3* was developed by **Dimps** and published by **Bandai** and **Atari**. *Dragon Ball Z: Budokai HD Collection* was published by **Namco Bandai Games**, now **Bandai Namco Entertainment**. *Dragon Ball* was created by **Akira Toriyama**. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION. This is a non-commercial fan project. It is **not affiliated with or endorsed by** Bandai Namco, Dimps, Atari, Shueisha, Toei Animation, Bird Studio, Microsoft or Nintendo. This repository contains no game code or assets. You must own the original disc and make your own dump. Rights holders with a concern can open an issue, and the material will be reviewed or removed promptly.
 

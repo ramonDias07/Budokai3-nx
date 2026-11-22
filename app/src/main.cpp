@@ -1,4 +1,7 @@
 #include "graphics.h"
+#include "main_menu_hint.h"
+#include "main_menu_legend_data.h"
+#include "ptbr_overlay.h"
 
 #include <algorithm>
 #include <array>
@@ -7,6 +10,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -56,6 +60,43 @@ REXCVAR_DEFINE_STRING(b3_perfil_performance, "", "Budokai 3",
                       "Ajustes salvos do perfil PERFORMANCE sobre os valores de fabrica: chave=valor;chave=valor.");
 REXCVAR_DEFINE_STRING(b3_perfil_nooverclock, "", "Budokai 3",
                       "Ajustes salvos do perfil NO OVERCLOCK sobre os valores de fabrica: chave=valor;chave=valor.");
+REXCVAR_DEFINE_BOOL(b3_menu_legend, true, "Interface",
+                    "Shows the quick menu shortcut ((+)+(-) : Quick Menu) under the game's own hint on the main menu.");
+REXCVAR_DEFINE_BOOL(b3_traducao_ptbr, false, "Interface",
+                    "Brazilian Portuguese fan translation (PS2), read from traducao/ptbr.b3tr built on your PC (see "
+                    "docs/traducao-ptbr.md). Live: applies from the next screen the game loads.");
+REXCVAR_DEFINE_INT32(b3_traducao_ptbr_max_growth_mb, 0, "Interface",
+                     "0 = use every translated entry. N > 0 = leave out (keep English) the entries that are more than N MB "
+                     "bigger than the original entry; each load of one costs that much extra game memory for a moment. "
+                     "Read at startup.");
+
+// Build 0.1.51: the legend drawn under the game's "BACK : Help" hint on the main menu. The detection and the per-swap
+// show/hide live in graphics.cpp; here the image is built and placed once (guest 1280x720 pixels, integer coordinates).
+namespace b3 {
+void SetMenuLegendLanguage(bool pt) {
+  static std::mutex mutex;
+  static rex::ui::IconoCompartido images[2];
+  std::lock_guard lock(mutex);
+  const int index = pt ? 1 : 0;
+  if (!images[index]) {
+    auto image = std::make_shared<rex::ui::IconoSuperposicion>();
+    image->id = 0xB3E6E001u + uint32_t(index);
+    image->ancho = pt ? legend::kPtWidth : legend::kEnWidth;
+    image->alto = pt ? legend::kPtHeight : legend::kEnHeight;
+    const uint8_t* data = pt ? legend::kPtRgba : legend::kEnRgba;
+    image->rgba.assign(data, data + size_t(image->ancho) * image->alto * 4u);
+    images[index] = std::move(image);
+  }
+  const float right = pt ? legend::kPtGuestRight : legend::kEnGuestRight;
+  const float center_y = pt ? legend::kPtGuestCenterY : legend::kEnGuestCenterY;
+  const auto& image = images[index];
+  const float x = std::round(right - float(image->ancho));
+  const float y = std::round(center_y - float(image->alto) / 2.0f);
+  rex::ui::FijarCalcomania(image, x, y, float(image->ancho), float(image->alto));
+  REXLOG_INFO("[B3 menu legend] image={} {}x{} at {},{}", pt ? "PT" : "EN", image->ancho, image->alto, x, y);
+}
+}  // namespace b3
+
 
 namespace {
 constexpr char kProfilesBind[] = "bind_b3_deko_profiles";
@@ -356,8 +397,8 @@ class PortMenu {
 
  private:
   enum Row {
-    kProfile, kTime, kInternal, kOutput, kUpscaler, kShadows, kBloomRow, kBlur, kBattleBlur, kFps, kMusic, kDelay,
-    kSave, kRestore, kRows
+    kProfile, kTime, kInternal, kOutput, kUpscaler, kShadows, kBloomRow, kBlur, kBattleBlur, kFps, kMenuLegend, kLanguage,
+    kMusic, kDelay, kSave, kRestore, kRows
   };
   static constexpr int kVisible = 13;
   static constexpr std::array<int, 7> kTimes{30, 35, 40, 45, 50, 55, 60};
@@ -417,6 +458,18 @@ class PortMenu {
       case kBlur: return std::string("LIGHTWEIGHT BLUR: ") + (Flag(kDesfoque) ? "YES" : "NO");
       case kBattleBlur: return fmt::format("BATTLE BLUR: {}P", Number(kDof));
       case kFps: return std::string("FPS COUNTER: ") + (REXCVAR_GET(switch_contador_fps) ? "YES" : "NO");
+      case kMenuLegend: return std::string("MAIN MENU LEGEND: ") + (REXCVAR_GET(b3_menu_legend) ? "YES" : "NO");
+      case kLanguage:
+        switch (b3::ptbr::GetStatus()) {
+          case b3::ptbr::Status::kNotInstalled: return "LANGUAGE: ENGLISH (PT-BR NOT INSTALLED)";
+          case b3::ptbr::Status::kUnavailable: return "LANGUAGE: ENGLISH (PT-BR UNAVAILABLE)";
+          default:
+            if (!b3::ptbr::Active()) {
+              // Translation off at boot: turning it on only takes effect after a restart.
+              return REXCVAR_GET(b3_traducao_ptbr) ? "LANGUAGE: PORTUGUESE (BR) - RESTART" : "LANGUAGE: ENGLISH";
+            }
+            return std::string("LANGUAGE: ") + (b3::ptbr::Enabled() ? "PORTUGUESE (BR)" : "ENGLISH");
+        }
       case kMusic: return std::string("MUSIC: ") + (music_independent_ ? "NORMAL SPEED" : "MATCH GAME TIME") + " (R)";
       case kDelay: return "AUDIO DELAY: " + std::to_string(REXCVAR_GET(b3_audio_atraso_ms)) + " MS";
       case kSave: return "SAVE AND CLOSE";
@@ -457,6 +510,21 @@ class PortMenu {
         return "SIZE OF THE BLUR BUFFER IN BATTLES. 540P OR 360P SAVE GPU TIME WITH LITTLE VISIBLE CHANGE.";
       case kFps:
         return "SHOWS THE FPS AND THE WORST FRAME GAP AT THE TOP LEFT. HANDY TO TEST SETTINGS, TURN OFF TO PLAY.";
+      case kMenuLegend:
+        return "SHOWS THE QUICK MENU SHORTCUT ON THE GAME'S MAIN MENU.";
+      case kLanguage: {
+        std::string text = "BRAZILIAN PORTUGUESE FAN TRANSLATION (PS2). TURNING IT ON NEEDS A RESTART; WHILE ON, "
+                           "SWITCHING LANGUAGE APPLIES FROM THE NEXT SCREEN.";
+        if (b3::ptbr::GetStatus() == b3::ptbr::Status::kReady && !b3::ptbr::Active() && REXCVAR_GET(b3_traducao_ptbr)) {
+          text += " SAVE AND CLOSE, THEN RESTART THE GAME TO APPLY.";
+        }
+        if (b3::ptbr::GetStatus() == b3::ptbr::Status::kNotInstalled) {
+          text += " NOT INSTALLED: COPY PTBR.B3TR TO /SWITCH/B3DEKO/TRADUCAO/ AND RESTART.";
+        } else if (b3::ptbr::GetStatus() == b3::ptbr::Status::kUnavailable) {
+          text += " UNAVAILABLE: THE PACK DOES NOT MATCH YOUR GAME FILES, SEE THE LOG.";
+        }
+        return text;
+      }
       case kMusic:
         return music_independent_
                    ? "MUSIC KEEPS ITS OWN TEMPO. RECOMMENDED WITH GAME TIME AT 60 FPS. OTHER SOUNDS MAY DRIFT OUT OF "
@@ -511,6 +579,22 @@ class PortMenu {
       case kBlur: toggle(kDesfoque); break;
       case kBattleBlur: profiles_.Set(kDof, std::to_string(Cycle(kDofs, Number(kDof), direction))); break;
       case kFps: REXCVAR_SET(switch_contador_fps, !REXCVAR_GET(switch_contador_fps)); break;
+      case kMenuLegend: REXCVAR_SET(b3_menu_legend, !REXCVAR_GET(b3_menu_legend)); break;
+      case kLanguage: {
+        if (b3::ptbr::GetStatus() != b3::ptbr::Status::kReady) break;
+        if (!b3::ptbr::Active()) {
+          // Off at boot: only the saved choice changes (applies after a restart); English again just clears it.
+          REXCVAR_SET(b3_traducao_ptbr, !REXCVAR_GET(b3_traducao_ptbr));
+          REXLOG_INFO("[ptbr] LANGUAGE set to {} for the next start (translation was off at boot)",
+                      REXCVAR_GET(b3_traducao_ptbr) ? "PORTUGUESE (BR)" : "ENGLISH");
+          break;
+        }
+        const bool pt = !b3::ptbr::Enabled();
+        REXCVAR_SET(b3_traducao_ptbr, pt);
+        b3::ptbr::SetEnabled(pt);
+        b3::SetMenuLegendLanguage(pt);
+        break;
+      }
       case kMusic: music_independent_ = !music_independent_; break;
       case kDelay: {
         const int delay = std::clamp(REXCVAR_GET(b3_audio_atraso_ms) + direction * kDelayStepMs,
@@ -1108,6 +1192,10 @@ class DekoXenosApp final : public rex::ReXApp {
     REXLOG_INFO("[B3 audio] modo={} atraso={} ms",
                 separate_music ? "musica_independente" : "mistura_0.1.32", delay);
     profiles_.Startup();
+    // Build 0.1.52: the PT-BR overlay must be in place before the runtime mounts game_root (sizes of the archives).
+    b3::ptbr::Initialize(package_ / "traducao" / "ptbr.b3tr", package_ / "game_root" / "us",
+                         REXCVAR_GET(b3_traducao_ptbr_max_growth_mb), REXCVAR_GET(b3_traducao_ptbr));
+    b3::ptbr::SetEnabled(REXCVAR_GET(b3_traducao_ptbr));
     // Concealment of late guest effect frames is on in every profile (0.1.48): the late frames happen at stock CPU
     // in all of them. The cvar (audio_switch_ocultar_faltas, default true) can still turn it off.
     config.graphics = b3::CreateXenosDeko(package_ / "b3_shaders.nfsp", options_);
@@ -1126,6 +1214,7 @@ class DekoXenosApp final : public rex::ReXApp {
       advanced_ = std::make_unique<AdvancedSettings>(profiles_, config_path);
     }
     rex::input::FijarFiltroMando(&DekoXenosApp::FilterPad);
+    b3::SetMenuLegendLanguage(b3::ptbr::Enabled());  // Portuguese legend only while the translation is really on
     rex::ui::RegisterBind(kProfilesBind, "F5", "Budokai 3 port menu", [this] {
       std::lock_guard lock(menu_mutex_);
       ToggleMenu(Menu::kQuick);
@@ -1153,6 +1242,7 @@ class DekoXenosApp final : public rex::ReXApp {
 
   void CloseMenu() {
     menu_ = Menu::kClosed;
+    b3::g_port_menu_open.store(false, std::memory_order_relaxed);
     release_buttons_.fill(true);
     rex::ui::FijarSuperposicion({});
     rex::ui::FijarLetreiro({});
@@ -1166,6 +1256,7 @@ class DekoXenosApp final : public rex::ReXApp {
     }
     if (menu == Menu::kAchievements && (!runtime() || !runtime()->kernel_state())) return;
     menu_ = menu;
+    b3::g_port_menu_open.store(true, std::memory_order_relaxed);
     previous_buttons_.fill(UINT64_MAX);
     release_buttons_.fill(false);
     switch (menu_) {

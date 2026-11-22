@@ -8,6 +8,8 @@ vsync = true
 log_to_file = true
 log_level = "info"
 switch_contador_fps = true
+# Shows the quick menu shortcut under the game's own "BACK : Help" hint on the main menu.
+b3_menu_legend = true
 # Rumble and its strength (0.25 = 25%).
 input_vibracion = true
 input_vibracion_fuerza = 0.250000

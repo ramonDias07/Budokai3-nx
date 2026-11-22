@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 
+REXCVAR_DECLARE(bool, b3_log_periodico);  // graphics.cpp
 REXCVAR_DEFINE_INT32(b3_velocidade_jogo, 1, "Budokai 3",
                      "Velocidade da luta: 1 = tempo real (delta time), 0 = original do jogo.");
 
@@ -101,7 +102,7 @@ REX_HOOK_RAW(sub_82088F70) {
     local.resets += sample.reset;
     local.clamps += sample.clamped;
   }
-  if (local.calls % 120 == 0) {
+  if (local.calls % 120 == 0 && REXCVAR_GET(b3_log_periodico)) {
     REXLOG_INFO("[B3 velocidade] fase={} chamadas={} aplicadas={} dt_ms={:.3f} ticks={:.5f} resets={} clamps={}",
                 phase, local.calls, local.applied, sample.seconds * 1000, sample.ticks, local.resets, local.clamps);
   }

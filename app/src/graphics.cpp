@@ -1,6 +1,10 @@
 #include "graphics.h"
 #include "game_speed.h"
 #include "dragon_rush_layout.h"
+#include "main_menu_hint.h"
+#include "main_menu_legend_data.h"
+#include "ptbr_overlay.h"
+#include <rex/ui/superposicion.h>
 
 #include "nfsmw_nativo_shaders.h"
 #include "nfsmw_shader_library.h"
@@ -69,6 +73,7 @@ extern "C" void RexSwitchPerfIntervaloSwap(unsigned vblanks);
 
 // Build 0.1.43. b3_deko_resolucao_interna (SDK, destinos.cpp) is live now; b3::PedirResolucaoInterna sets it.
 REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
+REXCVAR_DECLARE(bool, b3_menu_legend);
 // Official GPU boost (460.8 MHz handheld profile through apm, RAM clock untouched; switch_apm.cpp). Live.
 REXCVAR_DEFINE_BOOL(b3_gpu_boost, false, "Budokai 3",
                     "Perfil oficial de GPU 460.8 MHz (apm) so no portatil; no dock nao faz nada. Desligar restaura o "
@@ -78,6 +83,11 @@ REXCVAR_DEFINE_BOOL(b3_gpu_boost_ram1600, true, "Budokai 3",
 
 REXCVAR_DEFINE_BOOL(b3_deko_copia_final, true, "Budokai 3",
                     "Usa a imagem anterior ao FXAA na copia final do Budokai 3.");
+REXCVAR_DEFINE_BOOL(b3_log_periodico, false, "Budokai 3",
+                    "Periodic performance logs (swap stats every 300 swaps, [B3 Deko desempenho], game speed, [io] summary, "
+                    "SDK reports). Off: swap stats only at swap 1 and every 1800 swaps.");
+// Defined in the SDK kernel (xboxkrnl_io.cpp); mirrored from b3_log_periodico every swap.
+REXCVAR_DECLARE(bool, nfsmw_dk_informe_periodico);
 
 namespace b3 {
 
@@ -229,6 +239,9 @@ constexpr uint64_t kShadowProjectPixel = 0x4228617C65DB9D17ULL;
 constexpr uint64_t kStagePreviewPixel = 0x046E7D32000FC3F3ULL;
 constexpr uint64_t kHudVertex = 0xF37B3AC56DA38C91ULL;
 constexpr uint64_t kHudPixel = 0x1BFD0840B053E193ULL;
+// Build 0.1.53: the main menu UI sprites use the same pair as the combat HUD.
+constexpr uint64_t kMenuUiVertex = 0xF37B3AC56DA38C91ULL;
+constexpr uint64_t kMenuUiPixel = 0x1BFD0840B053E193ULL;
 constexpr uint64_t kSkinnedOutlineVertex = 0x9B2CDBD500DB8645ULL;
 constexpr uint64_t kSkinnedMaterialVertex = 0xF3AC1AA2FE3EA253ULL;
 constexpr uint64_t kFriezaSkinnedVertex = 0x2DD4268D7EE12280ULL;
@@ -337,6 +350,22 @@ class DekoCommandProcessor final : public CommandProcessor {
       LogPasses();
       if (captured_scene) scene_capture_ = 0;
     }
+    // Build 0.1.51: the main-menu legend decal follows the game's own "BACK : Help" hint (seen this swap) and hides
+    // while a port menu is open. Lock-free; the state stays until the next swap.
+    rex::ui::MostrarCalcomania(menu_hint_seen_ && !g_port_menu_open.load(std::memory_order_relaxed) &&
+                                   REXCVAR_GET(b3_menu_legend),
+                               menu_hint_alpha_);
+    if (menu_hint_seen_) PlaceMenuLegend();
+    menu_hint_seen_ = false;
+    menu_hint_alpha_ = 1.0f;
+    // Probe (once per session): if the hint was never matched after ~5 s in phase 5 (main menu), log every draw of
+    // the next swap, so the detector can be fixed from the console log.
+    if (menu_hint_logs_ == 0 && !hint_probe_done_ && PublishedPhase() == 5 && ++phase5_swaps_ == 300) {
+      hint_probe_swap_ = swaps_ + 1;
+      hint_probe_done_ = true;
+      REXLOG_INFO("[B3 menu hint probe] no hint matched after 300 swaps in phase 5; logging the draws of swap {}",
+                  hint_probe_swap_);
+    }
     const bool presented = render_->Presentar(graphics_system_->presenter(), swap, width, height);
     if (!presented) ++missed_swaps_;
     pacer_.Pace();
@@ -374,22 +403,27 @@ class DekoCommandProcessor final : public CommandProcessor {
     dialogue_sprites_captured_ = 0;
     hud_dumps_ = 0;
     dragon_rush_dumps_ = 0;
+    effect_diag_lines_ = effect_probes_ = effect_dumps_main_ = effect_dumps_other_ = 0;
     scene_checkpoints_ = 0;
     captured_effects_ = 0;
     UpdateOptions();
     last_post_pass_.reset();
     composite_source_ = 0;
-    if (swaps_ == 1 || swaps_ % 300 == 0) {
+    const bool periodic_logs = REXCVAR_GET(b3_log_periodico);
+    REXCVAR_SET(nfsmw_dk_informe_periodico, periodic_logs);
+    if (swaps_ == 1 || swaps_ % (periodic_logs ? 300 : 1800) == 0) {
       const auto stats = render_->EstadisticasDeDibujos();
       REXLOG_INFO("Xenos/Deko: swaps={} missed={} draws={}/{} failed={} rejected={} unknown_shaders={} "
                   "draw_unknown_vs={} draw_unknown_ps={} copies={} copies_failed={} composite_copies={}/{} edram_clears={}",
                   swaps_, missed_swaps_, stats.dibujados, attempted_draws_, failed_draws_,
                   stats.rechazados, unknown_shaders_, unknown_vs_draws_, unknown_ps_draws_,
                   copy_attempts_, failed_copies_, composite_copies_, composite_attempts_, scene_clears_);
-      REXLOG_INFO("[B3 Deko desempenho] swap={} finais_omitidos={} leituras_bloom_omitidas={} "
+      if (periodic_logs) {
+        REXLOG_INFO("[B3 Deko desempenho] swap={} finais_omitidos={} leituras_bloom_omitidas={} "
                   "bloom_omitido={} z_restaurado={} dof_leve_pedidos={} sombras_omitidas={} sombras_com_sesgo={}",
                   swaps_, desenhos_finais_omitidos_, leituras_bloom_omitidas_, bloom_omitidos_, restaura_z_,
                   dof_leve_pedidos_, sombras_omitidas_, sombras_com_sesgo_);
+      }
     }
   }
 
@@ -402,7 +436,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     }
     render_ = std::make_unique<x360::RenderDk>(*provider, memory_);
     diagnostic_ = REXCVAR_GET(b3_deko_diagnostico);
-    REXLOG_INFO("[B3 Deko build] 0.1.50: achievements detail card (A opens, B back); audio from 0.1.49 (one Audio Worker per client)");
+    REXLOG_INFO("[B3 Deko build] 0.1.56: performance pass (periodic logs off, shader lookup, shared UBO push, direct texture upload, capture block freed); effect capture on basic L3+R3");
     direct_composite_ = REXCVAR_GET(b3_deko_copia_final);
     REXLOG_INFO("Xenos/Deko: copia final sem FXAA {}", direct_composite_ ? "ativada" : "desativada");
     if (diagnostic_) {
@@ -469,11 +503,19 @@ class DekoCommandProcessor final : public CommandProcessor {
                      uint32_t count) override {
     if (!count) return nullptr;
     const size_t bytes = size_t(count) * sizeof(uint32_t);
-    std::string key(1, char(stage));
-    key.append(reinterpret_cast<const char*>(words), bytes);
-    if (auto it = shaders_.find(key); it != shaders_.end()) return it->second.get();
+    // Build 0.1.56: hashed lookup, no per-call std::string of the microcode. A hit is confirmed by stage, word count
+    // and memcmp against the raw words kept in the slot (Shader::ucode_data() is byte-swapped, so it is not compared).
+    const uint64_t content_hash = XXH3_64bits(words, bytes);
+    const uint64_t key = content_hash ^ uint64_t(stage);
+    auto& bucket = shaders_[key];
+    for (const auto& slot : bucket) {
+      if (slot->stage == stage && slot->raw.size() == count &&
+          std::memcmp(slot->raw.data(), words, bytes) == 0) {
+        return slot->shader.get();
+      }
+    }
 
-    auto shader = std::make_unique<DekoShader>(stage, XXH3_64bits(words, bytes), words, count);
+    auto shader = std::make_unique<DekoShader>(stage, content_hash, words, count);
     const bool vertex = stage == xenos::ShaderType::kVertex;
     const auto* match = library_.Identificar(vertex, shader->ucode_data());
     shader->deko_entry = ConvertShader(match);
@@ -493,7 +535,13 @@ class DekoCommandProcessor final : public CommandProcessor {
         ++shader_dumps_;
       }
     }
-    return shaders_.emplace(std::move(key), std::move(shader)).first->second.get();
+    auto slot = std::make_unique<ShaderSlot>();
+    slot->stage = stage;
+    slot->raw.assign(words, words + count);
+    slot->shader = std::move(shader);
+    DekoShader* result = slot->shader.get();
+    bucket.push_back(std::move(slot));
+    return result;
   }
 
   bool IssueDraw(xenos::PrimitiveType primitive, uint32_t count, IndexBufferInfo*, bool) override {
@@ -755,6 +803,59 @@ class DekoCommandProcessor final : public CommandProcessor {
         reported_switch_rush_ = true;
       }
     }
+    // Build 0.1.51: the game's main-menu hint sprites (BACK glyph and ": Help"), a 6-vertex HUD sprite in the
+    // bottom-right area. The tint word has no verified alpha, so the legend alpha stays 1.0.
+    // Build 0.1.56: only in the main-menu phase (5), and no more testing in this swap once the hint matched.
+    if (!menu_hint_seen_ && PublishedPhase() == 5 && !frame_.combat_post && draw.vs && draw.ps &&
+        ((vs_hash == kHudVertex && ps_hash == kHudPixel) || (vs_hash == kMenuUiVertex && ps_hash == kMenuUiPixel)) &&
+        surface_width == 1280 && color_info == 0 && primitive == xenos::PrimitiveType::kTriangleList &&
+        (count == 6 || count == 12) && fetch0.type == xenos::FetchConstantType::kTexture) {
+      MenuHintVertices hint_vertices;
+      MenuHintSprite hint;
+      if (ReadVertexWords(hint_vertices.data(), count * 6) &&
+          MatchMenuHintSprite(hint_vertices.data(), count, hint)) {
+        menu_hint_seen_ = true;
+        menu_hint_rect_ = hint;
+        if (menu_hint_logs_ < 8) {
+          ++menu_hint_logs_;
+          REXLOG_INFO("[B3 menu hint] swap={} count={} rect={:.1f},{:.1f}-{:.1f},{:.1f} uv={:.5f},{:.5f}-{:.5f},{:.5f} "
+                      "tint={:08X} fetch={:08X}/{:08X}/{:08X} phase={}",
+                      swaps_ + 1, count, hint.x0, hint.y0, hint.x1, hint.y1, hint.u0, hint.v0, hint.u1, hint.v1,
+                      hint.tint, fetch0.dword_0, fetch0.dword_1, fetch0.dword_2, PublishedPhase());
+        }
+      }
+    }
+    if (hint_probe_swap_ && swaps_ + 1 == hint_probe_swap_ && hint_probe_lines_ < 160) {
+      ++hint_probe_lines_;
+      MenuHintVertices probe_vertices;
+      const bool hud = count >= 6 && count <= 24 && count % 6 == 0 && ReadVertexWords(probe_vertices.data(), count * 6);
+      float px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+      std::string quads;
+      if (hud) {
+        px0 = py0 = 1e9f;
+        px1 = py1 = -1e9f;
+        for (uint32_t q = 0; q < count; q += 6) {
+          float qx0 = 1e9f, qy0 = 1e9f, qx1 = -1e9f, qy1 = -1e9f;
+          for (uint32_t i = q; i < q + 6; ++i) {
+            const float x = std::bit_cast<float>(probe_vertices[i * 6]);
+            const float y = std::bit_cast<float>(probe_vertices[i * 6 + 1]);
+            qx0 = std::min(qx0, x);
+            qy0 = std::min(qy0, y);
+            qx1 = std::max(qx1, x);
+            qy1 = std::max(qy1, y);
+          }
+          px0 = std::min(px0, qx0);
+          py0 = std::min(py0, qy0);
+          px1 = std::max(px1, qx1);
+          py1 = std::max(py1, qy1);
+          if (count > 6) quads += fmt::format(" quad{}={:.0f},{:.0f}-{:.0f},{:.0f}", q / 6, qx0, qy0, qx1, qy1);
+        }
+      }
+      REXLOG_INFO("[B3 menu hint probe] draw={} vs={:016X} ps={:016X} prim={} count={} surface={} color={:08X} "
+                  "post={} fetch95_rect={}{:.0f},{:.0f}-{:.0f},{:.0f}{}",
+                  frame_.draws, vs_hash, ps_hash, uint32_t(primitive), count, surface_width, color_info,
+                  frame_.combat_post, hud ? "" : "none ", px0, py0, px1, py1, quads);
+    }
     const bool skinned_outline = vs_hash == kSkinnedOutlineVertex && ps_hash == kColorPixel;
     const bool skinned_material = vs_hash == kSkinnedMaterialVertex && ps_hash == kModelEffectPixels.front();
     const bool combat_model = surface_width == 1280 && depth_alias == 0x530 && color_info == 0 &&
@@ -788,6 +889,33 @@ class DekoCommandProcessor final : public CommandProcessor {
     const bool model_capture = geometry && color_info == 0 && (surface_width == 1280 || surface_width == 640) &&
         (std::ranges::find(kModelEffectPixels, ps_hash) != kModelEffectPixels.end() ||
          vs_hash == 0xFDF960B5D7869030ULL || vs_hash == 0x4D5BDBCCEDEB1BB5ULL || vs_hash == 0x34E48B1366739F9BULL);
+    // Build 0.1.55: every particle/beam/effect draw of the manually captured swap (not models, HUD, strips).
+    const bool known_model_vs = vs_hash == kSkinnedOutlineVertex || vs_hash == kSkinnedMaterialVertex ||
+                                vs_hash == kFriezaSkinnedVertex || vs_hash == kFriezaRigidVertex ||
+                                vs_hash == 0xFDF960B5D7869030ULL || vs_hash == 0x4D5BDBCCEDEB1BB5ULL ||
+                                vs_hash == 0x34E48B1366739F9BULL;
+    const bool effect_diag = detailed && draw.vs && draw.ps && vs && !cleared && !restored_depth &&
+        mode == xenos::EdramMode::kColorDepth && !full_screen_strip && vs_hash != kFullScreenStrip &&
+        vs_hash != kClearVertex && vs_hash != kDepthRestoreVertex && !known_model_vs &&
+        std::ranges::find(kModelEffectPixels, ps_hash) == kModelEffectPixels.end() &&
+        !(vs_hash == kHudVertex && ps_hash == kHudPixel) && effect_diag_lines_ < 200 &&
+        (++effect_diag_lines_, true);
+    const char* effect_probe = "no";
+    if (effect_diag && effect_probes_ < 30) {
+      if (!vs->vertex_probe_checked) {
+        rex::string::StringBuffer disassembly;
+        vs->AnalyzeUcode(disassembly);
+        vs->vertex_probe_supported = ShaderInterpreter::CanInterpretShader(*vs);
+        vs->vertex_probe_checked = true;
+      }
+      if (vs->vertex_probe_supported) {
+        ++effect_probes_;
+        draw.diagnostico_dibujo = frame_.draws;
+        effect_probe = "yes";
+      } else {
+        effect_probe = "unsupported";
+      }
+    }
     if (full_capture && vs && draw.vs && (hud_capture || model_capture)) {
       if (!vs->vertex_probe_checked) {
         rex::string::StringBuffer disassembly;
@@ -808,7 +936,45 @@ class DekoCommandProcessor final : public CommandProcessor {
         }
       }
     }
+    const uint64_t effect_recorded_before = effect_diag ? render_->DibujosGrabados() : 0;
     const bool accepted = cleared || restored_depth || skip_bloom || render_->Dibujar(draw);
+    if (effect_diag) {
+      const bool effect_recorded = render_->DibujosGrabados() != effect_recorded_before;
+      const bool main_target = surface_width == 1280 && color_info == 0;
+      const char* dump = "none";
+      if (accepted && effect_recorded) {
+        if (main_target && effect_dumps_main_ < 16) {
+          ++effect_dumps_main_;
+          render_->VolcarCena(color_info, surface_width, frame_.draws, true);
+          dump = "scene_after";
+        } else if (!main_target && effect_dumps_other_ < 12) {
+          ++effect_dumps_other_;
+          render_->VolcarCena(color_info, surface_width, frame_.draws, true);
+          if (source && fetch0.type == xenos::FetchConstantType::kTexture) {
+            render_->VolcarEntrada(source, frame_.draws, 0);
+          }
+          dump = "target_after+tex0_input";
+        }
+      }
+      const auto vp = [&r](uint32_t reg) { return std::bit_cast<float>(r[reg]); };
+      REXLOG_INFO("[B3 diag effect] swap={} draw={} vs={:016X} ps={:016X} prim={} count={} surface_info={:08X} "
+                  "color_info={:08X} depth_info={:08X} depth_control={:08X} blend0={:08X} color_control={:08X} "
+                  "alpha_ref={:08X} color_mask={:08X} vte={:08X} clip_cntl={:08X} "
+                  "vport_scale={:.4f},{:.4f},{:.4f} vport_offset={:.4f},{:.4f},{:.4f} "
+                  "window_scissor={:08X}/{:08X} screen_scissor={:08X}/{:08X} tex0={:08X}/{:08X}/{:08X} "
+                  "copies_before={} accepted={} recorded={} probe={} dump={}",
+                  swaps_ + 1, frame_.draws, vs_hash, ps_hash, uint32_t(primitive), count,
+                  r[XE_GPU_REG_RB_SURFACE_INFO], color_info, depth_alias, depth_control,
+                  r[XE_GPU_REG_RB_BLENDCONTROL0], r[XE_GPU_REG_RB_COLORCONTROL], r[XE_GPU_REG_RB_ALPHA_REF],
+                  r[XE_GPU_REG_RB_COLOR_MASK], r[XE_GPU_REG_PA_CL_VTE_CNTL], r[XE_GPU_REG_PA_CL_CLIP_CNTL],
+                  vp(XE_GPU_REG_PA_CL_VPORT_XSCALE), vp(XE_GPU_REG_PA_CL_VPORT_YSCALE),
+                  vp(XE_GPU_REG_PA_CL_VPORT_ZSCALE), vp(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
+                  vp(XE_GPU_REG_PA_CL_VPORT_YOFFSET), vp(XE_GPU_REG_PA_CL_VPORT_ZOFFSET),
+                  r[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL], r[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
+                  r[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL], r[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
+                  fetch0.dword_0, fetch0.dword_1, fetch0.dword_2, frame_.copies, accepted, effect_recorded,
+                  effect_probe, dump);
+    }
     if (detailed && !full_capture && frame_.combat_post && color_info == 0 && surface_width == 1280 &&
         draw.vs && draw.ps && vs && ps && mode == xenos::EdramMode::kColorDepth && source &&
         !full_screen_strip && render_->DibujosGrabados() != recorded_before && dragon_rush_dumps_ < 48) {
@@ -1052,18 +1218,29 @@ class DekoCommandProcessor final : public CommandProcessor {
   }
 
   bool ReadDragonRushIcon(DragonRushIconVertices& vertices) {
+    return ReadHudVertices(vertices) && RepositionDragonRushIcon(vertices) && !REXCVAR_QUERY(bool, input_xbox_layout);
+  }
+
+  // The 6 vertices (36 words: x, y, z, tint, u, v) of the current HUD sprite draw, from vertex fetch 95.
+  bool ReadHudVertices(std::array<uint32_t, 36>& vertices) {
+    return ReadVertexWords(vertices.data(), vertices.size());
+  }
+
+  // Build 0.1.53: reads `words` (vertex count * 6) words of the current draw from vertex fetch 95; fetch.size must match.
+  bool ReadVertexWords(uint32_t* vertices, size_t words) {
     const auto& r = *register_file_;
     const auto initiator = r.Get<reg::VGT_DRAW_INITIATOR>();
     const auto fetch = r.GetVertexFetch(95);
     const uint64_t address = uint64_t(fetch.address) * 4;
+    const size_t bytes = words * sizeof(uint32_t);
     if (initiator.source_select != xenos::SourceSelect::kAutoIndex ||
         r[XE_GPU_REG_VGT_INDX_OFFSET] != 0 ||
         fetch.type != xenos::FetchConstantType::kVertex ||
-        fetch.endian != xenos::Endian::k8in32 || fetch.size != vertices.size() ||
-        address + sizeof(vertices) > x360::kMemoriaFisica) return false;
-    std::memcpy(vertices.data(), memory_->TranslatePhysical(uint32_t(address)), sizeof(vertices));
-    for (uint32_t& word : vertices) word = xenos::GpuSwap(word, fetch.endian);
-    return RepositionDragonRushIcon(vertices) && !REXCVAR_QUERY(bool, input_xbox_layout);
+        fetch.endian != xenos::Endian::k8in32 || fetch.size != words ||
+        address + bytes > x360::kMemoriaFisica) return false;
+    std::memcpy(vertices, memory_->TranslatePhysical(uint32_t(address)), bytes);
+    for (size_t i = 0; i < words; ++i) vertices[i] = xenos::GpuSwap(vertices[i], fetch.endian);
+    return true;
   }
 
   void FlushCompositeDraw() {
@@ -1402,6 +1579,55 @@ class DekoCommandProcessor final : public CommandProcessor {
   bool desfoque_leve_ = true;
   int dof_height_ = 720;
   bool sombras_projetadas_ = true;
+  bool menu_hint_seen_ = false;
+  MenuHintSprite menu_hint_rect_{};  // last matched hint rect (menu UI space 800x450); GPU thread only
+  // Build 0.1.54: legend placed directly below the hint (guest 1280x720 = rect x1.6), right-aligned to it.
+  // FijarCalcomania only runs when the rect moves by more than 2 px or the language changes.
+  void PlaceMenuLegend() {
+    const bool pt = ptbr::Enabled();
+    const float right = std::round(menu_hint_rect_.x1 * 1.6f);
+    const float hint_bottom = std::round(menu_hint_rect_.y1 * 1.6f);
+    const float w = float(pt ? legend::kPtWidth : legend::kEnWidth);
+    const float h = float(pt ? legend::kPtHeight : legend::kEnHeight);
+    float top = hint_bottom + 4.0f;
+    if (top + h > 719.0f) top = 720.0f - h - 1.0f;
+    const float x = std::round(right - w);
+    const bool lang_changed = legend_placed_ && pt != legend_pt_;
+    const bool changed = !legend_placed_ || lang_changed || std::fabs(right - legend_right_) > 2.0f ||
+                         std::fabs(top - legend_top_) > 2.0f;
+    // The language switch in main.cpp re-places the decal at its old constants; repeat once after it settles.
+    if (lang_changed) legend_replace_at_ = uint64_t(swaps_) + 60;
+    const bool repeat = legend_replace_at_ && uint64_t(swaps_) >= legend_replace_at_;
+    if (!changed && !repeat) return;
+    legend_replace_at_ = lang_changed ? legend_replace_at_ : 0;
+    legend_placed_ = true;
+    legend_pt_ = pt;
+    legend_right_ = right;
+    legend_top_ = top;
+    auto& slot = legend_images_[pt ? 1 : 0];
+    if (!slot) {
+      auto image = std::make_shared<rex::ui::IconoSuperposicion>();
+      image->id = 0xB3E6E001u + (pt ? 1u : 0u);
+      image->ancho = pt ? legend::kPtWidth : legend::kEnWidth;
+      image->alto = pt ? legend::kPtHeight : legend::kEnHeight;
+      const uint8_t* data = pt ? legend::kPtRgba : legend::kEnRgba;
+      image->rgba.assign(data, data + size_t(image->ancho) * image->alto * 4u);
+      slot = std::move(image);
+    }
+    rex::ui::FijarCalcomania(slot, x, top, w, h);
+    REXLOG_INFO("[B3 menu legend] image={} {}x{} at {},{} (hint guest right={} bottom={})", pt ? "PT" : "EN",
+                slot->ancho, slot->alto, x, top, right, hint_bottom);
+  }
+  rex::ui::IconoCompartido legend_images_[2];
+  bool legend_placed_ = false, legend_pt_ = false;
+  float legend_right_ = 0, legend_top_ = 0;
+  uint64_t legend_replace_at_ = 0;
+  float menu_hint_alpha_ = 1.0f;
+  uint32_t menu_hint_logs_ = 0;
+  uint32_t phase5_swaps_ = 0;
+  uint64_t hint_probe_swap_ = 0;
+  bool hint_probe_done_ = false;
+  uint32_t hint_probe_lines_ = 0;
   bool reported_map_distortion_ = false, reported_switch_rush_ = false;
   uint64_t dof_leve_pedidos_ = 0, sombras_omitidas_ = 0, sombras_com_sesgo_ = 0;
   bool model_redraw_ = false, model_checkpoint_ = false;
@@ -1411,7 +1637,12 @@ class DekoCommandProcessor final : public CommandProcessor {
   std::optional<x360::PeticionDibujo> composite_draw_;
   nfsmw::nativo::ShadersNativos library_;
   std::unordered_map<const ShaderEntry*, x360::EntradaShader> entries_;
-  std::unordered_map<std::string, std::unique_ptr<DekoShader>> shaders_;
+  struct ShaderSlot {
+    xenos::ShaderType stage;
+    std::vector<uint32_t> raw;
+    std::unique_ptr<DekoShader> shader;
+  };
+  std::unordered_map<uint64_t, std::vector<std::unique_ptr<ShaderSlot>>> shaders_;
   std::unique_ptr<x360::RenderDk> render_;
   const DekoShader* last_vs_ = nullptr;
   uint64_t vs_generation_ = 1;
@@ -1431,6 +1662,11 @@ class DekoCommandProcessor final : public CommandProcessor {
   uint32_t world_shadow_logs_ = 0;
   uint32_t hud_dumps_ = 0;
   uint32_t dragon_rush_dumps_ = 0;
+  // Build 0.1.55: effect draw diagnostics in the manual capture.
+  uint32_t effect_diag_lines_ = 0;
+  uint32_t effect_probes_ = 0;
+  uint32_t effect_dumps_main_ = 0;
+  uint32_t effect_dumps_other_ = 0;
   uint32_t scene_checkpoints_ = 0;
   uint32_t captured_effects_ = 0;
   uint32_t dialogue_sprites_captured_ = 0;

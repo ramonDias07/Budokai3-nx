@@ -2,7 +2,11 @@
 
 - **Ramon (ramonDias07)** — manutenção do projeto, testes em Switch físico e validação das releases.
 - **OpenAI Codex** — implementação e depuração do port, ferramentas de compilação e documentação em colaboração com Ramon.
-- **Claude (Anthropic)** — modelos Claude Opus, Sonnet e Haiku, via Claude Code: implementação, depuração e documentação das versões 0.1.41 a 0.1.50, em colaboração com Ramon.
+- **Claude (Anthropic)** — modelos Claude Opus, Sonnet e Haiku, via Claude Code: implementação, depuração e documentação das versões 0.1.41 a 0.1.56, em colaboração com Ramon.
+
+## Tradução PT-BR
+
+- **TheRalf** — tradução de fãs em português do Brasil do *Dragon Ball Z: Budokai 3* de PS2 (patch v1.2), feita à mão, imagem por imagem. A tradução opcional do port é gerada a partir desse trabalho, no PC de quem joga.
 
 ## Projetos cujo trabalho foi usado
 

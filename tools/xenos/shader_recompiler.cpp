@@ -318,8 +318,18 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     // vertex index (meshes instanced by index arithmetic), or another element of a semantic (above).
     // It reads the host's per-draw copy of the buffer the fetch constant describes (see
     // vfetchMemory in shader_common.h).
+    // A declared element whose destination swizzle has no X/Y/Z/W component: D3D rewrites the fetch
+    // of an element missing from the bound declaration to write only constants (B3 VS 7E3AB645941B0B1F,
+    // texcoord as 0, 0). It reads nothing; the path below writes just the 0/1 components.
+    bool fetchesNothing = true;
+    for (size_t i = 0; i < 4; i++)
+    {
+        const auto swizzle = getDestSwizzle(instr.dstSwizzle, i);
+        fetchesNothing &= !(swizzle >= FetchDestinationSwizzle::X && swizzle <= FetchDestinationSwizzle::W);
+    }
+
     if (vertexElements.find(address) == vertexElements.end() || !lastFullFetchByVertexIndex ||
-        otherElementOfSemantic)
+        otherElementOfSemantic || fetchesNothing)
     {
         std::string sourceSwizzle;
         for (size_t i = 0; i < 4; i++)

@@ -24,6 +24,7 @@ add_executable(budokai3_nx
     app/src/battle_audio.cpp
     app/src/b3_usa_dispatch.cpp
     app/src/game_speed.cpp
+    app/src/ptbr_overlay.cpp
     app/generated/b3_battle_delta.cpp
     app/src/nfsmw_nativo_shaders.cpp
     app/src/nfsmw_shader_library.cpp
@@ -31,6 +32,12 @@ add_executable(budokai3_nx
 target_include_directories(budokai3_nx PRIVATE "${BUDOKAI_GENERATED_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/app/src" "${REXSDK_DIR}/thirdparty/xxHash")
 target_compile_options(budokai3_nx PRIVATE -fno-strict-aliasing -ffp-contract=off)
 target_link_libraries(budokai3_nx PRIVATE rex::runtime rex::gpu-xenos)
+# Build 0.1.52: zstd for the PT-BR translation pack (app/src/ptbr_overlay.cpp), from the devkitPro portlibs.
+set(BUDOKAI_ZSTD_LIBRARY "${DEVKITPRO}/portlibs/switch/lib/libzstd.a")
+if(NOT EXISTS "${BUDOKAI_ZSTD_LIBRARY}")
+    message(FATAL_ERROR "libzstd.a not found in ${DEVKITPRO}/portlibs/switch/lib (pacman: switch-zstd)")
+endif()
+target_link_libraries(budokai3_nx PRIVATE "${BUDOKAI_ZSTD_LIBRARY}")
 rexglue_switch_configure_target(budokai3_nx GPU_PLUGINS xenos)
 rexglue_switch_add_deko3d(budokai3_nx)
 if(BUDOKAI_ICON)
