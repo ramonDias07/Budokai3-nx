@@ -12,11 +12,11 @@ Se algo falhar, a mensagem aparece em vermelho e os detalhes ficam em `out\insta
 
 Ao atualizar, copie `B3.nro`, `budokai3.toml`, `b3_shaders.nfsp` e `shadercache_dksh.bin`. Se já houver um `budokai3.toml` no cartão, apague ou renomeie o arquivo para receber os novos padrões. Preserve a pasta `budokai3/`, que guarda os saves e dados.
 
-## Tradução PT-BR opcional
+## Tradução PT-BR incluída
 
 A tradução é de **TheRalf**, feita para o *Dragon Ball Z: Budokai 3* de PS2 (patch v1.2). Ele a fez à moda antiga, redesenhando à mão diálogos, menus, cápsulas e gráficos, e levou muito tempo. **O mérito da tradução é todo dele.** O port só converte esse trabalho para a versão HD.
 
-Nada traduzido vem com o port. A ferramenta `tools/traducao_ptbr.py` gera o pacote `traducao/ptbr.b3tr` no PC, a partir da ISO de PS2 do próprio usuário com o patch de TheRalf aplicado. A tradução liga pela opção **LANGUAGE** do menu rápido, que pede SAVE AND CLOSE e reiniciar o jogo. Com ela desligada no início, o jogo fica igual e não paga nenhum custo extra. [Como gerar](https://github.com/ramonDias07/Budokai3-nx/blob/v0.1.56/docs/traducao-ptbr.md)
+O pacote `ptbr.b3tr` vai anexado a esta release e o `install.bat` o coloca sozinho na pasta do jogo: não é preciso a ISO de PS2 nem o patch. No Switch, abra o menu rápido (`+` e `−` juntos), mude **LANGUAGE** para **PORTUGUESE (BR)**, escolha SAVE AND CLOSE e reinicie o jogo. Com a tradução desligada no início, o jogo fica igual e não paga nenhum custo extra. Quem compila à mão copia o `ptbr.b3tr` para `/switch/B3deko/traducao/`. [Como o pacote é gerado](https://github.com/ramonDias07/Budokai3-nx/blob/v0.1.56/docs/traducao-ptbr.md)
 
 Os textos que a tradução original não mudou, cerca de 795, continuam em inglês. Também ficam sem tradução os retratos, os vídeos, o áudio e 4 texturas exclusivas do HD.
 
@@ -70,4 +70,4 @@ Este port é um projeto independente. O que cada projeto contribuiu está em [do
 
 ## English
 
-One-click Windows installer (`install.bat`) and an optional Brazilian Portuguese translation. The translation is the PS2 fan translation by **TheRalf**, made by hand and image by image, and all credit goes to him. The port converts it locally from your own discs and never distributes it. This release also adds an on-screen quick-menu legend, the two missing special-effect shaders and a performance pack. Versions 0.1.51–0.1.56 are not tested on hardware yet. You still need your own Xbox 360 *Budokai HD Collection (USA, Japan)* ISO, and no game data is distributed.
+One-click Windows installer (`install.bat`) and a Brazilian Portuguese translation. The translation is the PS2 fan translation by **TheRalf**, made by hand and image by image, and all credit goes to him. It is converted for the HD version and attached to this release as `ptbr.b3tr`; the installer adds it automatically (switch LANGUAGE in the quick menu and restart). This release also adds an on-screen quick-menu legend, the two missing special-effect shaders and a performance pack. Versions 0.1.51–0.1.56 are not tested on hardware yet. You still need your own Xbox 360 *Budokai HD Collection (USA, Japan)* ISO. Apart from the translated screens, no game data is distributed.

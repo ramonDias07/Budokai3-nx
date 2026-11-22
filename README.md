@@ -11,7 +11,7 @@ Para começar, baixe **Source code** na release. No Windows, instale o devkitPro
 Destaques da **v0.1.56** (B3deko 0.1.51 a 0.1.56):
 
 - **Instalador de um clique para Windows** (`install.bat`): confere e instala as ferramentas, pede a ISO e gera a pasta para o SD.
-- **Tradução PT-BR opcional**, a tradução de fãs de **TheRalf** para o Budokai 3 de PS2, convertida no seu PC a partir dos seus discos e ligada pela opção LANGUAGE do menu rápido. [Como gerar](docs/traducao-ptbr.md)
+- **Tradução PT-BR incluída**, a tradução de fãs de **TheRalf** para o Budokai 3 de PS2, convertida para a versão HD. O `install.bat` já coloca o pacote na pasta do jogo; no Switch, ligue a opção LANGUAGE do menu rápido. [Detalhes](docs/traducao-ptbr.md)
 - **Legenda do menu rápido** no menu principal do jogo: `(+)+(-) : Quick Menu`.
 - **Efeitos de especiais:** os dois shaders de efeito que faltavam (feixe e fogo) estão no pacote e no cache pré-compilado.
 - **Pacote de desempenho** (0.1.56): logs periódicos e perfil de GPU desligados por padrão, busca de shader sem cópia, constantes por push e subida direta de texturas.
@@ -90,13 +90,13 @@ O jogo, os personagens, a arte, a música, as vozes e o design pertencem a essas
 
 ### Tradução PT-BR
 
-- **TheRalf** pela tradução de fãs em português do Brasil do *Dragon Ball Z: Budokai 3* de PS2 (patch v1.2). Ela foi feita à moda antiga, redesenhando à mão diálogos, menus, cápsulas e gráficos, e levou muito tempo. O mérito da tradução é todo dele. O port só converte esse trabalho para a versão HD, no PC de quem joga, e não distribui a tradução nem os arquivos do jogo.
+- **TheRalf** pela tradução de fãs em português do Brasil do *Dragon Ball Z: Budokai 3* de PS2 (patch v1.2). Ela foi feita à moda antiga, redesenhando à mão diálogos, menus, cápsulas e gráficos, e levou muito tempo. O mérito da tradução é todo dele. O port converte esse trabalho para a versão HD e o oferece pronto, como pacote anexado à release, para quem joga não precisar da ISO de PS2 nem do patch.
 
 Veja de onde veio cada parte e como outros ports tratam instalação e dados originais em [Referências](docs/referencias.md).
 
 ## English overview
 
-**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.56** builds on 0.1.50 (40 FPS fights at stock CPU clocks, clean audio, official GPU boost, achievements with in-game icons) and adds a one-click Windows installer (`install.bat`), an optional Brazilian Portuguese translation (the PS2 fan translation by **TheRalf**, all credit to him; converted locally from your own discs, never distributed), an on-screen quick-menu legend, the two missing special-effect shaders and a performance pack. Versions up to 0.1.49 were tested on a physical Switch; the 0.1.51–0.1.56 changes were not yet.
+**Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.56** builds on 0.1.50 (40 FPS fights at stock CPU clocks, clean audio, official GPU boost, achievements with in-game icons) and adds a one-click Windows installer (`install.bat`), a Brazilian Portuguese translation (the PS2 fan translation by **TheRalf**, all credit to him), converted for the HD version and added by the installer, an on-screen quick-menu legend, the two missing special-effect shaders and a performance pack. Versions up to 0.1.49 were tested on a physical Switch; the 0.1.51–0.1.56 changes were not yet.
 
 Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. On Windows, install devkitPro and double-click `install.bat`: it checks the tools, asks for your ISO and builds the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.56) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
@@ -108,7 +108,7 @@ Este é um projeto de fãs, não oficial e sem fins lucrativos. **Não tem afili
 
 - *Dragon Ball*, *Dragon Ball Z* e *Budokai* são marcas e obras protegidas dos respectivos titulares. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION. O jogo é © Bandai Namco Entertainment Inc.
 - *Xbox 360* é marca da Microsoft Corporation e *Nintendo Switch* é marca da Nintendo. Os nomes aparecem aqui só para indicar compatibilidade.
-- Este repositório **não distribui** o jogo, seus executáveis, arquivos de dados, áudio, vídeo, texturas, código recompilado nem chaves. Para compilar, é preciso um disco original adquirido legalmente e um dump feito pela própria pessoa. Não peça nem compartilhe ISOs ou NROs que contenham dados do jogo.
+- Este repositório **não distribui** o jogo, seus executáveis, arquivos de dados, áudio, vídeo, código recompilado nem chaves. A única exceção é a tradução de fãs de TheRalf, anexada à release como pacote `ptbr.b3tr`: ela só contém as telas traduzidas, funciona apenas sobre os arquivos do disco 360 de quem joga e segue a forma como traduções de fãs costumam ser distribuídas. Para compilar, é preciso um disco original adquirido legalmente e um dump feito pela própria pessoa. Não peça nem compartilhe ISOs ou NROs que contenham dados do jogo.
 - As capturas em `docs/screenshots/` servem só para documentar o funcionamento do port. As imagens do jogo continuam pertencendo aos titulares.
 - Titulares de direitos com alguma objeção podem abrir uma [issue](https://github.com/ramonDias07/Budokai3-nx/issues). O material será revisto ou removido prontamente.
 

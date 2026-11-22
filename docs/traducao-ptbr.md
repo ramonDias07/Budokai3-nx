@@ -1,6 +1,8 @@
-# Tradução PT-BR (opcional)
+# Tradução PT-BR
 
-O port pode usar a tradução de fãs em português do Brasil feita para o **Budokai 3 Collector's Edition de PS2** (patch PT-BR v1.2). **Nenhum dado traduzido é distribuído** com o port nem faz parte deste repositório: a ferramenta `tools/traducao_ptbr.py` gera tudo no PC a partir dos arquivos do próprio usuário e produz um único arquivo, `ptbr.b3tr`, que o port carrega quando existe no cartão SD.
+O port usa a tradução de fãs em português do Brasil feita para o **Budokai 3 Collector's Edition de PS2** (patch PT-BR v1.2), convertida para a versão HD num único arquivo, `ptbr.b3tr`, que o port carrega quando ele existe no cartão SD.
+
+**Para jogar, não é preciso fazer nada disto.** O pacote pronto vai anexado à release e o `install.bat` o coloca em `B3deko/traducao/`. No Switch, abra o menu rápido (`+` e `−` juntos), mude **LANGUAGE** para **PORTUGUESE (BR)**, escolha SAVE AND CLOSE e reinicie o jogo. O resto desta página explica como o pacote é gerado, para quem quiser refazê-lo a partir dos próprios discos.
 
 **Créditos:** a tradução é de **TheRalf**. Ele a fez à moda antiga, redesenhando à mão diálogos, menus, cápsulas e gráficos, e levou muito tempo. O mérito da tradução é todo dele; este port só converte o trabalho para a versão HD.
 

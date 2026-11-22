@@ -8,7 +8,8 @@ O build para Switch parte da edição **USA/Japan para Xbox 360**. O extrator l�
 2. Baixe **Source code (zip)** da release, extraia numa pasta com uns 20 GB livres e dê dois cliques em `install.bat`.
 3. O instalador confere as ferramentas. Se faltar Git, Python, CMake ou Ninja, ele oferece instalar pelo `winget`. Ele baixa o LLVM-MinGW e o DXC nas versões usadas pelas builds publicadas e confere o SHA-256 de cada um.
 4. Escolha o seu `.iso` USA/Japan na janela que abrir e espere. A primeira vez leva de uma a duas horas.
-5. No fim, ele abre `out\sd\switch\`. Copie a pasta `B3deko` para `/switch/` no cartão e siga a [etapa 3](#3-copiar-para-o-switch).
+5. Ele baixa a tradução PT-BR de TheRalf (pacote `ptbr.b3tr`, cerca de 80 MB) e a coloca em `B3deko/traducao/`. Para não incluir, rode `install.bat -NoTranslation`.
+6. No fim, ele abre `out\sd\switch\`. Copie a pasta `B3deko` para `/switch/` no cartão e siga a [etapa 3](#3-copiar-para-o-switch).
 
 Se algo falhar, a mensagem aparece em vermelho e os detalhes ficam em `out\install.log`. Rodar de novo continua de onde parou. O resto deste guia descreve os mesmos passos à mão, para Linux e para quem já tem as ferramentas.
 

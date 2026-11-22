@@ -63,8 +63,8 @@ REXCVAR_DEFINE_STRING(b3_perfil_nooverclock, "", "Budokai 3",
 REXCVAR_DEFINE_BOOL(b3_menu_legend, true, "Interface",
                     "Shows the quick menu shortcut ((+)+(-) : Quick Menu) under the game's own hint on the main menu.");
 REXCVAR_DEFINE_BOOL(b3_traducao_ptbr, false, "Interface",
-                    "Brazilian Portuguese fan translation (PS2), read from traducao/ptbr.b3tr built on your PC (see "
-                    "docs/traducao-ptbr.md). Live: applies from the next screen the game loads.");
+                    "Brazilian Portuguese fan translation (PS2), by TheRalf, read from traducao/ptbr.b3tr (added by "
+                    "install.bat; see docs/traducao-ptbr.md). Live: applies from the next screen the game loads.");
 REXCVAR_DEFINE_INT32(b3_traducao_ptbr_max_growth_mb, 0, "Interface",
                      "0 = use every translated entry. N > 0 = leave out (keep English) the entries that are more than N MB "
                      "bigger than the original entry; each load of one costs that much extra game memory for a moment. "

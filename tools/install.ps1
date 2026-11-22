@@ -10,6 +10,8 @@
 #   -LlvmMingw <folder>   an extracted LLVM-MinGW (with bin\clang.exe)
 #   -NoInstall            never install anything; only report what is missing
 #   -Jobs <n>             parallel compile jobs
+#   -NoTranslation        do not add the PT-BR translation pack
+#   -PtbrPack <file>      use a local ptbr.b3tr instead of downloading it
 param(
     [string]$Iso = '',
     [string]$DevkitPro = '',
@@ -17,7 +19,9 @@ param(
     [string]$DxcRoot = '',
     [string]$LlvmMingw = '',
     [switch]$NoInstall,
-    [int]$Jobs = 0
+    [int]$Jobs = 0,
+    [switch]$NoTranslation,
+    [string]$PtbrPack = ''
 )
 $ErrorActionPreference = 'Stop'
 # powershell -File passes "a,b" as one string: accept commas and semicolons as separators too.
@@ -34,6 +38,9 @@ $LlvmZip = @{ Name = 'llvm-mingw-20261020-ucrt-x86_64'
 $DxcZip = @{ Name = 'dxc_2024_07_31'
     Url = 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2407/dxc_2024_07_31.zip'
     Sha256 = 'E2627F004F0F9424D8C71EA1314D04F38C5A5096884AE9217F1F18BD320267B5' }
+# Brazilian Portuguese fan translation by TheRalf, converted for this port (release asset).
+$PtbrDownload = @{ Url = 'https://github.com/ramonDias07/Budokai3-nx/releases/download/v0.1.56/ptbr.b3tr'
+    Sha256 = 'F898E83FC8E35A133A3E00C8F0613BD26F9BDC4B34A323952677C69CD05F1477' }
 # winget packages for the common tools
 $Winget = [ordered]@{ git = 'Git.Git'; python = 'Python.Python.3.12'; cmake = 'Kitware.CMake'; ninja = 'Ninja-build.Ninja' }
 
@@ -102,7 +109,7 @@ Say 'This builds Dragon Ball Z: Budokai 3 HD for your Switch from YOUR OWN Xbox 
 Say 'The first run downloads the tools and takes a long time (often 1 to 2 hours). Keep this window open.'
 
 # ---------------------------------------------------------------- 1. tools
-Step '1/6 Checking the tools'
+Step '1/7 Checking the tools'
 Refresh-Path
 $free = (Get-PSDrive -Name ($Root.Substring(0, 1))).Free / 1GB
 if ($free -lt 20) { Fail ("Only {0:N0} GB free on drive {1}:. About 20 GB are needed." -f $free, $Root.Substring(0, 1)) }
@@ -158,7 +165,7 @@ Say '    all tools found' Green
 if ($Jobs -le 0) { $Jobs = [Math]::Max(1, [Math]::Min([Environment]::ProcessorCount, 8)) }
 
 # ---------------------------------------------------------------- 2. the disc
-Step '2/6 Choosing your disc image'
+Step '2/7 Choosing your disc image'
 if (-not $Iso) {
     Say '    Select the .iso of "Dragon Ball Z: Budokai HD Collection" (Xbox 360, USA/Japan) in the window that opens.'
     try {
@@ -174,14 +181,14 @@ if (-not (Test-Path $Iso)) { Fail "File not found: $Iso" }
 Say "    $Iso"
 
 # ---------------------------------------------------------------- 3. SDK
-Step '3/6 Downloading and preparing the ReXGlue SDK (first time only)'
+Step '3/7 Downloading and preparing the ReXGlue SDK (first time only)'
 Push-Location $Root
 try {
     if (-not (Test-Path 'sdk')) { Run 'preparing the SDK (downloads about 1 GB)' $python @('tools/prepare_sdk.py') }
     else { Say '    already prepared' }
 
     # ---------------------------------------------------------------- 4. host tools
-    Step '4/6 Building the PC tools (first time only)'
+    Step '4/7 Building the PC tools (first time only)'
     $cc = @("-DCMAKE_C_COMPILER=$LlvmMingw\bin\clang.exe", "-DCMAKE_CXX_COMPILER=$LlvmMingw\bin\clang++.exe")
     $rexglue = 'sdk\out\win-amd64\rexglue.exe'
     if (-not (Test-Path $rexglue)) {
@@ -204,16 +211,47 @@ try {
     Say '    PC tools ready' Green
 
     # ---------------------------------------------------------------- 5. the game
-    Step '5/6 Building the game for the Switch (the long part)'
+    Step '5/7 Building the game for the Switch (the long part)'
     Say '    Extracting your disc, recompiling the game, converting the shaders and compiling the NRO.'
     Run 'building B3.nro' $python @('tools/build.py', $Iso, '--rexglue', $rexglue, '--xenosrecomp', 'out/xenos/XenosRecomp.exe',
         '--spirv-cross', 'out/spirv-cross/spirv-cross.exe', '--uam', 'out/uam/uam.exe', '--devkitpro', $DevkitPro, '--jobs', "$Jobs")
 } finally { Pop-Location }
 
-# ---------------------------------------------------------------- 6. done
 $package = Join-Path $Root 'out\sd\switch\B3deko'
 if (-not (Test-Path (Join-Path $package 'B3.nro'))) { Fail 'The build finished but B3.nro was not found.' }
-Step '6/6 Done!'
+
+# ---------------------------------------------------------------- 6. PT-BR translation
+if (-not $NoTranslation) {
+    Step '6/7 Adding the Brazilian Portuguese translation (by TheRalf)'
+    $ptbrDir = Join-Path $package 'traducao'
+    $ptbrFile = Join-Path $ptbrDir 'ptbr.b3tr'
+    New-Item -ItemType Directory -Force $ptbrDir | Out-Null
+    $have = (Test-Path $ptbrFile) -and ((Get-FileHash $ptbrFile -Algorithm SHA256).Hash -eq $PtbrDownload.Sha256)
+    if (-not $have) {
+        $cached = Join-Path $Downloads 'ptbr.b3tr'
+        if ($PtbrPack) { Copy-Item $PtbrPack $cached -Force }
+        elseif (-not ((Test-Path $cached) -and ((Get-FileHash $cached -Algorithm SHA256).Hash -eq $PtbrDownload.Sha256))) {
+            Say '    downloading the translation pack (about 80 MB)...'
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $ProgressPreference = 'SilentlyContinue'
+            try { Invoke-WebRequest -Uri $PtbrDownload.Url -OutFile $cached -UseBasicParsing }
+            catch { Say "    could not download the translation ($($_.Exception.Message)). The game works in English; run install.bat again later to add it." Yellow }
+        }
+        if ((Test-Path $cached) -and ((Get-FileHash $cached -Algorithm SHA256).Hash -eq $PtbrDownload.Sha256)) {
+            Copy-Item $cached $ptbrFile -Force
+        } elseif (Test-Path $cached) {
+            Remove-Item $cached -Force
+            Say '    the translation download is damaged; run install.bat again to retry. The game works in English.' Yellow
+        }
+    }
+    if (Test-Path $ptbrFile) {
+        Say '    translation added. On the Switch: quick menu (+ and - together) > LANGUAGE > PORTUGUESE (BR), then SAVE AND CLOSE and restart the game.' Green
+        Say '    Translation: TheRalf (PS2 fan translation). All credit for it goes to him.'
+    }
+}
+
+# ---------------------------------------------------------------- 7. done
+Step '7/7 Done!'
 Say "    Your Switch folder is ready: $package" Green
 Say '    Copy the whole B3deko folder into the "switch" folder of your SD card (SD:\switch\B3deko).'
 Say '    On the Switch, open the Homebrew Menu by holding R while starting any game, then pick B3.nro.'
