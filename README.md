@@ -4,7 +4,7 @@ Port homebrew não oficial de **Dragon Ball Z: Budokai 3 HD** para Nintendo Swit
 
 [Release v0.1.50](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.50) · [Como compilar](docs/build.md) · [Capturas de gameplay](#capturas-de-gameplay) · [English overview](#english-overview)
 
-Para começar, baixe **Source code** na release e siga o guia de compilação com seu próprio dump **USA/Japan de Xbox 360**. As ferramentas geram o `B3.nro` e montam a pasta para o SD.
+Para começar, baixe **Source code** na release. No Windows, instale o devkitPro e dê dois cliques em `install.bat`: ele confere as ferramentas, pede o seu dump **USA/Japan de Xbox 360**, gera o `B3.nro` e monta a pasta para o SD. O [guia de compilação](docs/build.md) explica o jeito fácil e os passos à mão.
 
 ## Estado do port
 
@@ -89,7 +89,7 @@ Veja de onde veio cada parte e como outros ports tratam instalação e dados ori
 
 **Budokai3-nx** is an unofficial Nintendo Switch homebrew port of **Dragon Ball Z: Budokai 3 HD** from the Xbox 360 collection. It uses ReXGlue for static recompilation and Deko3D for rendering. Version **0.1.50** builds on 0.1.46 and adds stable 40 FPS fights at stock CPU clocks, a fix for crackling audio (one Audio Worker per sound client), an official GPU boost mode, achievements with in-game icons, and experimental 1080P/1440P dock options. Versions 0.1.47 to 0.1.49 were tested on a physical Switch; the 0.1.50 achievement detail card and the dock resolutions were not.
 
-Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. The build tools generate the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.50) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
+Download **Source code** from the release and build with your own **USA/Japan Xbox 360 ISO**. On Windows, install devkitPro and double-click `install.bat`: it checks the tools, asks for your ISO and builds the NRO and its SD card folder locally. Hardware test reports and performance contributions are welcome in English or Portuguese. [Release](https://github.com/ramonDias07/Budokai3-nx/releases/tag/v0.1.50) · [Build guide in Portuguese](docs/build.md) · [Gameplay screenshots](#capturas-de-gameplay) · [Issues](https://github.com/ramonDias07/Budokai3-nx/issues)
 
 **Original game and legal notice.** *Dragon Ball Z: Budokai 3* was developed by **Dimps** and published by **Bandai** and **Atari**. *Dragon Ball Z: Budokai HD Collection* was published by **Namco Bandai Games**, now **Bandai Namco Entertainment**. *Dragon Ball* was created by **Akira Toriyama**. ©BIRD STUDIO/SHUEISHA, TOEI ANIMATION. This is a non-commercial fan project. It is **not affiliated with or endorsed by** Bandai Namco, Dimps, Atari, Shueisha, Toei Animation, Bird Studio, Microsoft or Nintendo. This repository contains no game code or assets. You must own the original disc and make your own dump. Rights holders with a concern can open an issue, and the material will be reviewed or removed promptly.
 

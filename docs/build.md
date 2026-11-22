@@ -2,6 +2,16 @@
 
 O build para Switch parte da edição **USA/Japan para Xbox 360**. O extrator lê `DBZ3/yae3_xenon.xex` dentro da ISO e verifica SHA-256 `b40bba40cfd6c90cb269ebf5020818924f43109bcc86827a3cc37124c052a26b`. Depois salva o executável como `assets/game_root/default.xex` e extrai os arquivos `DBZ3/us/`. O menu da coletânea e os arquivos de Budokai 1 ficam no disco.
 
+## Jeito fácil (Windows): `install.bat`
+
+1. Instale o [devkitPro](https://github.com/devkitPro/installer/releases) (`devkitProUpdater-*.exe`) e marque **Switch Development**. Mantenha a pasta `C:\devkitPro`.
+2. Baixe **Source code (zip)** da release, extraia numa pasta com uns 20 GB livres e dê dois cliques em `install.bat`.
+3. O instalador confere as ferramentas. Se faltar Git, Python, CMake ou Ninja, ele oferece instalar pelo `winget`. Ele baixa o LLVM-MinGW e o DXC nas versões usadas pelas builds publicadas e confere o SHA-256 de cada um.
+4. Escolha o seu `.iso` USA/Japan na janela que abrir e espere. A primeira vez leva de uma a duas horas.
+5. No fim, ele abre `out\sd\switch\`. Copie a pasta `B3deko` para `/switch/` no cartão e siga a [etapa 3](#3-copiar-para-o-switch).
+
+Se algo falhar, a mensagem aparece em vermelho e os detalhes ficam em `out\install.log`. Rodar de novo continua de onde parou. O resto deste guia descreve os mesmos passos à mão, para Linux e para quem já tem as ferramentas.
+
 ## 1. Preparar as ferramentas
 
 - Git, CMake 3.25 ou superior, Ninja e Python 3.11 ou superior com o módulo `xxhash`.

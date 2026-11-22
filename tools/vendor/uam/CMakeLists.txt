@@ -51,13 +51,18 @@ target_include_directories(uamlib PRIVATE ${UAM_DIR}/source ${UAM_MESA} ${UAM_GE
 # meson.build's project options: c99 / c++11 (flex output uses 'register', gone in C++17), release asserts
 set_target_properties(uamlib PROPERTIES C_STANDARD 99 C_EXTENSIONS OFF CXX_STANDARD 11 CXX_EXTENSIONS OFF
                                         POSITION_INDEPENDENT_CODE ON)
-target_compile_definitions(uamlib PRIVATE "PACKAGE_STRING=\"uam 1.1.0\"" DESKTOP _USE_MATH_DEFINES _GNU_SOURCE
-                                          HAVE_POSIX_MEMALIGN
+target_compile_definitions(uamlib PRIVATE "PACKAGE_STRING=\"uam 1.1.0\"" DESKTOP _USE_MATH_DEFINES
                                           # always: Mesa's asserts abort, and a Debug game build must not
                                           NDEBUG)
+# A Windows host (MinGW) has neither strchrnul (_GNU_SOURCE) nor posix_memalign; Mesa's own fallbacks
+# (util_strchrnul, _aligned_malloc) are used there (same fix as the banjo-nx copy of uam).
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  target_compile_definitions(uamlib PRIVATE _GNU_SOURCE HAVE_POSIX_MEMALIGN)
+endif()
 target_compile_options(uamlib PRIVATE -ffunction-sections -fdata-sections -w -O2
                                       $<$<COMPILE_LANGUAGE:C>:-Werror=implicit-function-declaration>)
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT DEFINED NX_ROOT)
+# Also MinGW (a Windows host build of the uam tool): winpthreads
+if((NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" OR MINGW) AND NOT DEFINED NX_ROOT)
   find_package(Threads REQUIRED)
   target_link_libraries(uamlib PUBLIC Threads::Threads)  # c11/threads.h: pthread mutexes
 endif()
