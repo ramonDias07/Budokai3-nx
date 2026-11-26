@@ -1,5 +1,7 @@
 # Compilar e instalar
 
+> Este guia é para compilar do código-fonte. Quem só quer jogar pode usar o `B3deko-Installer.exe` da release, que não precisa de devkitPro, Python nem compilador (veja o [README](../README.md#instalar)).
+
 O build para Switch parte da edição **USA/Japan para Xbox 360**. O extrator lê `DBZ3/yae3_xenon.xex` dentro da ISO e verifica SHA-256 `b40bba40cfd6c90cb269ebf5020818924f43109bcc86827a3cc37124c052a26b`. Depois salva o executável como `assets/game_root/default.xex` e extrai os arquivos `DBZ3/us/`. O menu da coletânea e os arquivos de Budokai 1 ficam no disco.
 
 ## Jeito fácil (Windows): `install.bat`

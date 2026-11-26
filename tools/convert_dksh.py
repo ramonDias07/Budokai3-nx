@@ -5,14 +5,8 @@ import subprocess
 import sys
 import tempfile
 
-spv_dir = pathlib.Path(sys.argv[1])
-out_dir = pathlib.Path(sys.argv[2])
-spirv_cross = pathlib.Path(sys.argv[3])
-uam = pathlib.Path(sys.argv[4])
 import deko3d_glsl
 
-out_dir.mkdir(parents=True, exist_ok=True)
-entries = sorted(spv_dir.glob("*.spv"))
 
 def bind_guest_texture_slots(text):
     # The converter numbers sampled-image expressions in encounter order.
@@ -58,40 +52,59 @@ def bind_guest_texture_slots(text):
     return text.replace(metadata[0], " texb=" + ",".join(mappings), 1)
 
 
-def convert(path):
-    stage = "vert" if path.name.startswith("vs_") else "frag"
-    with tempfile.TemporaryDirectory(dir=out_dir) as tmp:
-        vk = pathlib.Path(tmp) / "shader.vk.glsl"
-        glsl = pathlib.Path(tmp) / "shader.glsl"
-        dksh = pathlib.Path(tmp) / "shader.dksh"
-        result = subprocess.run([str(spirv_cross), str(path), "--version", "460", "--vulkan-semantics",
-                                "--relax-nan-checks", "--output", str(vk)], capture_output=True, text=True)
-        if result.returncode:
-            return path.name, "spirv-cross", (result.stderr or result.stdout).strip()[:300]
-        try:
-            text, _ = deko3d_glsl.convert(vk.read_text(encoding="utf-8"), stage,
-                                          deko3d_glsl.DEFAULT_UBO_MAP, "handle")
-            if stage == "frag":
-                text = bind_guest_texture_slots(text)
-        except Exception as exc:
-            return path.name, "glsl-convert", str(exc)[:300]
-        glsl.write_text(text, encoding="utf-8", newline="\n")
-        result = subprocess.run([str(uam), "-s", stage, "-o", str(dksh), str(glsl)], capture_output=True, text=True)
-        if result.returncode or not dksh.is_file():
-            log = (result.stdout + result.stderr).strip()
-            return path.name, "uam", next((line.strip()[:300] for line in log.splitlines() if "error" in line.lower()), log[:300])
-        out_dir.joinpath(path.stem + ".glsl").write_text(text, encoding="utf-8", newline="\n")
-        out_dir.joinpath(path.stem + ".dksh").write_bytes(dksh.read_bytes())
-        return path.name, "ok", str(dksh.stat().st_size)
+def convert_all(spv_dir, out_dir, spirv_cross, uam, workers=8, log=print):
+    """Convert every *.spv in spv_dir to .glsl/.dksh in out_dir. Returns the number of shaders; raises on failure."""
+    spv_dir, out_dir = pathlib.Path(spv_dir), pathlib.Path(out_dir)
+    spirv_cross, uam = pathlib.Path(spirv_cross), pathlib.Path(uam)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    entries = sorted(spv_dir.glob("*.spv"))
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-    results = list(executor.map(convert, entries))
-counts = {}
-for _, status, _ in results:
-    counts[status] = counts.get(status, 0) + 1
-print(f"shaders={len(results)} counts={counts}")
-for row in results:
-    if row[1] != "ok":
-        print("\t".join(row))
-if not entries or counts.get("ok", 0) != len(entries):
-    raise SystemExit(1)
+    def convert(path):
+        stage = "vert" if path.name.startswith("vs_") else "frag"
+        with tempfile.TemporaryDirectory(dir=out_dir) as tmp:
+            vk = pathlib.Path(tmp) / "shader.vk.glsl"
+            glsl = pathlib.Path(tmp) / "shader.glsl"
+            dksh = pathlib.Path(tmp) / "shader.dksh"
+            result = subprocess.run([str(spirv_cross), str(path), "--version", "460", "--vulkan-semantics",
+                                    "--relax-nan-checks", "--output", str(vk)], capture_output=True, text=True)
+            if result.returncode:
+                return path.name, "spirv-cross", (result.stderr or result.stdout).strip()[:300]
+            try:
+                text, _ = deko3d_glsl.convert(vk.read_text(encoding="utf-8"), stage,
+                                              deko3d_glsl.DEFAULT_UBO_MAP, "handle")
+                if stage == "frag":
+                    text = bind_guest_texture_slots(text)
+            except Exception as exc:
+                return path.name, "glsl-convert", str(exc)[:300]
+            glsl.write_text(text, encoding="utf-8", newline="\n")
+            result = subprocess.run([str(uam), "-s", stage, "-o", str(dksh), str(glsl)], capture_output=True, text=True)
+            if result.returncode or not dksh.is_file():
+                output = (result.stdout + result.stderr).strip()
+                return path.name, "uam", next((line.strip()[:300] for line in output.splitlines() if "error" in line.lower()), output[:300])
+            out_dir.joinpath(path.stem + ".glsl").write_text(text, encoding="utf-8", newline="\n")
+            out_dir.joinpath(path.stem + ".dksh").write_bytes(dksh.read_bytes())
+            return path.name, "ok", str(dksh.stat().st_size)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(convert, entries))
+    counts = {}
+    for _, status, _ in results:
+        counts[status] = counts.get(status, 0) + 1
+    log(f"shaders={len(results)} counts={counts}")
+    for row in results:
+        if row[1] != "ok":
+            log("\t".join(row))
+    if not entries or counts.get("ok", 0) != len(entries):
+        raise RuntimeError(f"Shader conversion failed: {counts}")
+    return len(results)
+
+
+def main():
+    try:
+        convert_all(*sys.argv[1:5])
+    except RuntimeError:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -2651,6 +2651,24 @@ index 3a1bebb..5dad40e 100644
      // Signal the decoder thread to start processing.
      // work_event_->Set();
    } else if (r >= XmaRegister::Context0Clear && r <= XmaRegister::Context9Clear) {
+diff --git a/src/codegen/project_recompiler.cpp b/src/codegen/project_recompiler.cpp
+index 7898a97..731fb69 100644
+--- a/src/codegen/project_recompiler.cpp
++++ b/src/codegen/project_recompiler.cpp
+@@ -275,6 +275,13 @@ Result<void> ProjectRecompiler::Run(const ProjectRecompilerOptions& opts) {
+     }
+   }
+ 
++  // Installer aid: with REXGLUE_DUMP_ONLY set (and non-empty), stop right after the main-module image dump. No analysis
++  // and no code generation, so a user's disc can be decoded without building anything.
++  if (const char* dump_only = std::getenv("REXGLUE_DUMP_ONLY"); dump_only && *dump_only) {
++    REXLOG_INFO("REXGLUE_DUMP_ONLY set: image dump done, skipping analysis and code generation");
++    return Ok();
++  }
++
+   std::vector<rex::system::object_ref<rex::system::UserModule>> dllModules;
+   for (size_t i = 1; i < targeted.size(); ++i) {
+     const auto& dllConfig = targeted[i].config;
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
 index aa8992e..617315e 100644
 --- a/src/core/CMakeLists.txt

@@ -10,6 +10,30 @@
 static constexpr std::string_view KILL_OUTPUT_PLACEHOLDER = "/*renut kill output*/";
 #endif
 
+// B3 (tools/shader_layout.json "codegen"): BANJO_B3_PLAIN_ALU=1 in the environment writes MUL, MAD, DP2/3/4, MIN
+// and MAX as plain HLSL operators, as the port's first shader library did (before b3Mul and friends in
+// shader_common.h, the Shader Model 3 zero-times-anything rule). tools/shaders.py sets it for the shaders the
+// shipped library has kept from that build, so the install reproduces the library tested on the console.
+static bool PlainAlu()
+{
+    static const bool plain = [] {
+        const char *on = std::getenv("BANJO_B3_PLAIN_ALU");
+        return on && on[0] == '1';
+    }();
+    return plain;
+}
+
+// B3: BANJO_B3_FETCH_KEEPS_INDEX=1 does not count a vertex fetch that writes r0.x as overwriting the vertex
+// index (the first library's rule; later fetches by r0.x then still read the input layout's stream).
+static bool FetchKeepsIndex()
+{
+    static const bool keeps = [] {
+        const char *on = std::getenv("BANJO_B3_FETCH_KEEPS_INDEX");
+        return on && on[0] == '1';
+    }();
+    return keeps;
+}
+
 static constexpr char SWIZZLES[] = 
 { 
     'x',
@@ -225,8 +249,9 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     }
     // A vertex fetch can replace r0.x just as an ALU instruction can.
     // Classify the current full fetch first: its source is read before its destination.
+    // B3: BANJO_B3_FETCH_KEEPS_INDEX=1 skips this, as the port's first shader library did (see PlainAlu).
     if (!isPixelShader && instr.dstRegister == 0 &&
-        getDestSwizzle(instr.dstSwizzle, 0) != FetchDestinationSwizzle::Keep)
+        getDestSwizzle(instr.dstSwizzle, 0) != FetchDestinationSwizzle::Keep && !FetchKeepsIndex())
         vertexIndexOverwritten = true;
 
     // A bound declaration's element read by another index: the input layout cannot deliver it,
@@ -1264,7 +1289,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluVectorOpcode::Mul:
-            print("b3Mul({}, {})", op(VECTOR_0), op(VECTOR_1));
+            PlainAlu() ? print("{} * {}", op(VECTOR_0), op(VECTOR_1)) : print("b3Mul({}, {})", op(VECTOR_0), op(VECTOR_1));
             break;
 
         // banjo-nx (2026-10-17, from banjo-nx's translator): the Xenos has no move; the assembler writes MAX dst, src,
@@ -1279,7 +1304,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             if (a == b)
                 out += a;
             else
-                print("{}({}, {})", instr.vectorOpcode == AluVectorOpcode::Min ? "b3Min" : "b3Max", a, b);
+                print("{}({}, {})", instr.vectorOpcode == AluVectorOpcode::Min ? (PlainAlu() ? "min" : "b3Min")
+                    : (PlainAlu() ? "max" : "b3Max"), a, b);
             break;
         }
 
@@ -1312,7 +1338,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluVectorOpcode::Mad:
-            print("b3Mad({}, {}, {})", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
+            PlainAlu() ? print("{} * {} + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2)) : print("b3Mad({}, {}, {})", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
             break;
 
         case AluVectorOpcode::CndEq:
@@ -1329,11 +1355,11 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
 
         case AluVectorOpcode::Dp4:
         case AluVectorOpcode::Dp3:
-            print("b3Dot({}, {})", op(VECTOR_0), op(VECTOR_1));
+            PlainAlu() ? print("dot({}, {})", op(VECTOR_0), op(VECTOR_1)) : print("b3Dot({}, {})", op(VECTOR_0), op(VECTOR_1));
             break;
 
         case AluVectorOpcode::Dp2Add:
-            print("b3Dot({}, {}) + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
+            PlainAlu() ? print("dot({}, {}) + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2)) : print("b3Dot({}, {}) + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
             break;
 
         case AluVectorOpcode::Cube:
@@ -1464,15 +1490,18 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluScalarOpcode::Muls:
-            print("b3Mul({}, {})", op(SCALAR_0), op(SCALAR_1));
+            PlainAlu() ? print("{} * {}", op(SCALAR_0), op(SCALAR_1)) : print("b3Mul({}, {})", op(SCALAR_0), op(SCALAR_1));
             break;
 
         case AluScalarOpcode::MulsPrev:
-            print("b3Mul({}, ps)", op(SCALAR_0));
+            PlainAlu() ? print("{} * ps", op(SCALAR_0)) : print("b3Mul({}, ps)", op(SCALAR_0));
             break;
 
         case AluScalarOpcode::MulsPrev2:
-            print("b3MulPrev2({}, {}, ps)", op(SCALAR_0), op(SCALAR_1));
+            if (PlainAlu())
+                print("{} * ps", op(SCALAR_0));
+            else
+                print("b3MulPrev2({}, {}, ps)", op(SCALAR_0), op(SCALAR_1));
             break;
 
         // banjo-nx: the scalar move, as above.
@@ -1485,7 +1514,8 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             if (a == b)
                 out += a;
             else
-                print("{}({}, {})", instr.scalarOpcode == AluScalarOpcode::Mins ? "b3Min" : "b3Max", a, b);
+                print("{}({}, {})", instr.scalarOpcode == AluScalarOpcode::Mins ? (PlainAlu() ? "min" : "b3Min")
+                    : (PlainAlu() ? "max" : "b3Max"), a, b);
             break;
         }
 
@@ -1614,7 +1644,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
 
         case AluScalarOpcode::Mulsc0:
         case AluScalarOpcode::Mulsc1:
-            print("b3Mul({}, {})", op(SCALAR_CONSTANT_0), op(SCALAR_CONSTANT_1));
+            PlainAlu() ? print("{} * {}", op(SCALAR_CONSTANT_0), op(SCALAR_CONSTANT_1)) : print("b3Mul({}, {})", op(SCALAR_CONSTANT_0), op(SCALAR_CONSTANT_1));
             break;
 
         case AluScalarOpcode::Addsc0:

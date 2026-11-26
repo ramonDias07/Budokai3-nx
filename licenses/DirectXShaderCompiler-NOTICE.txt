@@ -1,0 +1,14 @@
+DirectX Shader Compiler (DXC) - notice
+
+The installer bundles dxcompiler.dll from the DirectX Shader Compiler, release v1.8.2407.
+It is used by XenosRecomp to compile the HLSL generated from your own game's shaders to DXIL/SPIR-V on your PC.
+
+Project:  DirectX Shader Compiler (Microsoft)
+Upstream: https://github.com/microsoft/DirectXShaderCompiler
+Version:  release v1.8.2407
+Licence:  University of Illinois/NCSA Open Source License (the DXC licence), which includes
+          LLVM components under their own licences. The full text is in the LICENSE.TXT and
+          ThirdPartyNotices.txt files of the upstream repository and of its release packages.
+
+The full licence text was not available locally when this bundle was prepared, so it is not
+reproduced here. Read it at the upstream URL above.
