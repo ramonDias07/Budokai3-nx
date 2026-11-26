@@ -618,7 +618,7 @@ index 1c5fe45..57ccc72 100644
      uint64_t fases[8] = {};        // the hash of each phase of its 64-byte lines (Huellas)
    };
 diff --git a/include/rex/x360/deko/render.h b/include/rex/x360/deko/render.h
-index 4cffec3..c545951 100644
+index 4cffec3..50d2370 100644
 --- a/include/rex/x360/deko/render.h
 +++ b/include/rex/x360/deko/render.h
 @@ -24,11 +24,16 @@
@@ -689,7 +689,7 @@ index 4cffec3..c545951 100644
  };
  
  class RenderDk final : public DestinosNativos {
-@@ -141,16 +169,42 @@ class RenderDk final : public DestinosNativos {
+@@ -141,16 +169,45 @@ class RenderDk final : public DestinosNativos {
  
    // ---- DestinosNativos (nfsmw_dk_destinos.cpp, except Dibujar)
    bool Copiar(const RegistrosCopia& registros) override;
@@ -730,11 +730,14 @@ index 4cffec3..c545951 100644
 +  void VolcarDragonRush(uint32_t pitch, uint32_t dibujo);
 +  void VolcarCena(uint32_t rb_color_info, uint32_t pitch, uint32_t dibujo, bool despues);
 +  void VolcarEntrada(uint32_t base, uint32_t dibujo, uint32_t ranura);
++  // B3 0.1.60 diagnostic: one line about the resolved texture at that address (size, host size, last frame written,
++  // other sizes kept, internal scale).
++  std::string DescribirResuelta(uint32_t base) const;
 +  uint64_t DibujosGrabados() const { return dibujados_; }
    EstadisticasDibujos EstadisticasDeDibujos() const override;
    void EsperarSubidas() override {}  // vertices are copied on the ring thread, before Dibujar returns
    uint64_t CopiasProfundidad() const override { return copias_profundidad_; }
-@@ -186,6 +240,7 @@ class RenderDk final : public DestinosNativos {
+@@ -186,6 +243,7 @@ class RenderDk final : public DestinosNativos {
    // Everything the draw path remembers having emitted is forgotten: the next draw emits its state again. After a
    // new command list, a clear, a copy, the output pass.
    void OlvidarEstado();
@@ -742,7 +745,7 @@ index 4cffec3..c545951 100644
    // Recorded before anything of a frame's first slot: what the previous frame's output sampled is read, and the
    // tiled cache stays off (deko3d never writes it: HowToDeko3d.md, section 6, item 7).
    void InicioDeTrabajo();
-@@ -206,29 +261,135 @@ class RenderDk final : public DestinosNativos {
+@@ -206,29 +264,137 @@ class RenderDk final : public DestinosNativos {
    // engine (0.78 ms per Mpixel), keeps compressed images compressed, and orders against draws with Fragments barriers
    // instead of Full ones. rop_sin_barrera_: render target writes since the last barrier that made them visible to
    // sampling; copia3d_pendiente_: a copy since then, which the next draw or clear waits for.
@@ -830,14 +833,14 @@ index 4cffec3..c545951 100644
 +    uint32_t origen_edram = UINT32_MAX;
 +    bool conserva_estencil = false;
 +    uint64_t revision_z_origen = UINT64_MAX;
-   };
++  };
 +  // The frame dump (PedirVolcado): from one Swap to the next, each resolved texture written is copied to a read-back
 +  // block; at the next Swap the GPU is waited for and they are written as BMPs (destinos.cpp, TerminarVolcado).
 +  struct EntradaVolcado {
 +    uint32_t offset = 0, ancho = 0, alto = 0, bpp = 0, base = 0, formato_guest = 0, etapa = 0;
 +    DkImageFormat formato = DkImageFormat_None;
 +    uint32_t bytes_bc2 = 0;
-+  };
+   };
 +  static constexpr uint32_t kVerticesSonda = 8;
 +  static constexpr uint32_t kBytesVolcado = 96u << 20;  // 0.1.55-diag: room for the extra effect dumps (16 main + 12 other)
 +  struct SaidaVertice {
@@ -860,6 +863,8 @@ index 4cffec3..c545951 100644
 +  bool volcado_pedido_ = false, volcando_ = false;
 +  uint64_t volcado_swap_ = 0;
 +  std::unordered_set<uint32_t> incompatibles_volcado_;
++  // 0.1.61: addresses whose stale other-size resolve was logged by TexturaResuelta (at most 64 per session).
++  std::unordered_set<uint32_t> resueltas_antiguas_avisadas_;
 +  ImagenDk volcado_hud_{};
 +  bool volcado_frontal_capturado_ = false, volcado_otro_capturado_ = false, volcado_detallado_ = false;
 +  uint32_t dibujos_sin_envio_ = 0;  // draws recorded since the last submission (nfsmw_dk_envio_parcial)
@@ -884,7 +889,7 @@ index 4cffec3..c545951 100644
    void DestruirImagen(ImagenDk& imagen);
    // A new render target starts as the Vulkan path's: color 0, depth 1 and stencil 0.
    void PrepararDestino(ImagenDk& imagen);
-@@ -237,6 +398,15 @@ class RenderDk final : public DestinosNativos {
+@@ -237,6 +403,15 @@ class RenderDk final : public DestinosNativos {
    void CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool borrara);
    // A pending depth clear (ImagenDk::borrado_pendiente) recorded now on its own: before a copy or a swap reads it.
    void HacerBorradoPendiente(ImagenDk& destino);
@@ -900,7 +905,7 @@ index 4cffec3..c545951 100644
    // The rows of a clear: the useful area, if known.
    uint32_t AltoDeBorrado(const ImagenDk& destino) const;
    // The clear of a bound target (index `i` among the bound colors, or depth) on rows [desde, hasta).
-@@ -246,6 +416,26 @@ class RenderDk final : public DestinosNativos {
+@@ -246,6 +421,26 @@ class RenderDk final : public DestinosNativos {
    void CompletarBanda(ImagenDk& destino, uint32_t hasta, bool ligado, uint32_t i);
    // The bound pass's targets (EmpezarPase), for CompletarBanda in each draw.
    std::array<ImagenDk*, 5> imagenes_pase_{};
@@ -927,7 +932,7 @@ index 4cffec3..c545951 100644
    // nfsmw_nativo_frontal_perezoso: the resolve of the scene to the front buffer is not copied. The Swap paints from the
    // render target (its clear is deferred until it is bound again, after the output pass); anything that would change
    // the target first, or a draw that samples the front buffer, makes the copy then (MaterializarFrontal).
-@@ -260,6 +450,11 @@ class RenderDk final : public DestinosNativos {
+@@ -260,6 +455,11 @@ class RenderDk final : public DestinosNativos {
    uint32_t frontal_obsoleta_ = 0;     // painted from its target: the texture itself was not written
    bool frontal_apagado_ = false;      // a late read showed up: copies from then on
    uint64_t frontales_ahorrados_ = 0, frontales_copiados_ = 0, bandas_completadas_ = 0;
@@ -939,7 +944,7 @@ index 4cffec3..c545951 100644
    void MaterializarFrontal();
    // Before a target's content changes (a pass binds it, a clear, a band): the pending front copy from it is made.
    void AntesDeCambiarDestino(const ImagenDk* destino) {
-@@ -270,6 +465,51 @@ class RenderDk final : public DestinosNativos {
+@@ -270,6 +470,51 @@ class RenderDk final : public DestinosNativos {
    // The images (and descriptors) of a render target and a resolved texture of the same size and format change places:
    // the resolve without a copy.
    void IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta);
@@ -991,7 +996,7 @@ index 4cffec3..c545951 100644
    // A render target whose content went to a resolved texture in a swap gets it back (copy), before it is drawn on or
    // resolved again; or, for the shadow map's car pass while the shadow minimum is applied, a clear instead.
    void RestaurarContenido(ImagenDk& destino, bool para_resolver);
-@@ -362,7 +602,7 @@ class RenderDk final : public DestinosNativos {
+@@ -362,7 +607,7 @@ class RenderDk final : public DestinosNativos {
    bool CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entrada);
    uint32_t CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_recorte, uint32_t modo_sc, float viewport[6],
                              float ndc[4], DkScissor& tijera);
@@ -1000,7 +1005,7 @@ index 4cffec3..c545951 100644
    // The DKSH of a library shader for that specialization value (masked) and, for a vertex shader, the
    // interpolators it keeps. nullptr if it cannot be had (logged once).
    // `variante_ps` (pixel shaders): kVariante* flags (nfsmw_dk_dibujos.cpp), part of the DKSH cache key; 0 is the
-@@ -392,8 +632,11 @@ class RenderDk final : public DestinosNativos {
+@@ -392,8 +637,11 @@ class RenderDk final : public DestinosNativos {
    // `valido_hasta`: the last frame the answer holds without asking again (a game texture until its next fingerprint
    // check; resolved textures and cubemaps, this frame only).
    uint32_t PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint32_t& ancho, uint32_t& alto, bool& puntual,
@@ -1014,7 +1019,7 @@ index 4cffec3..c545951 100644
    uint32_t SamplerDe(const uint32_t* f, bool puntual);
    uint32_t VaciaDe(uint16_t tipo_shader) const;
    bool LeerNivel(uint64_t direccion, bool mosaico, uint32_t pitch_bloques, uint64_t fila_bytes, const FormatoDk& tf,
-@@ -422,12 +665,40 @@ class RenderDk final : public DestinosNativos {
+@@ -422,12 +670,40 @@ class RenderDk final : public DestinosNativos {
    std::unordered_map<uint64_t, ImagenDk> destinos_;
    std::unordered_map<uint64_t, ImagenDk> profundidades_;
    std::unordered_map<uint32_t, Resuelta> resueltas_;
@@ -1055,7 +1060,7 @@ index 4cffec3..c545951 100644
    // GPU time: timestamps at the start and the end of each work's command list (the pre-list's uploads before it are
    // not counted). Totals since start, as TiempoGpu gives them.
    std::vector<std::vector<uint8_t>> marcas_;  // per slot: the category starting at each timestamp
-@@ -473,7 +744,9 @@ class RenderDk final : public DestinosNativos {
+@@ -473,7 +749,9 @@ class RenderDk final : public DestinosNativos {
    std::unordered_map<uint32_t, uint32_t> samplers_;  // key -> descriptor
    uint32_t siguiente_sampler_ = 1;
    std::array<ImagenDk, 3> vacias_;
@@ -1066,7 +1071,7 @@ index 4cffec3..c545951 100644
    // Per fetch constant, within one frame: the slot, the size and whether it is a point sample.
    struct CacheFetch {
      std::array<uint32_t, 6> fetch{};
-@@ -481,6 +754,7 @@ class RenderDk final : public DestinosNativos {
+@@ -481,6 +759,7 @@ class RenderDk final : public DestinosNativos {
      uint64_t valido_hasta = 0;
      uint64_t generacion = 0;
      uint32_t ranura = 0, sampler = 0, ancho = 0, alto = 0;
@@ -1074,16 +1079,30 @@ index 4cffec3..c545951 100644
    };
    std::array<CacheFetch, 512> cache_fetch_{};
    uint64_t generacion_texturas_ = 1;  // goes up when a resolved texture appears or changes size
-@@ -501,6 +775,8 @@ class RenderDk final : public DestinosNativos {
+@@ -500,7 +779,22 @@ class RenderDk final : public DestinosNativos {
+     }
    };
    std::unordered_map<ClaveCargado, std::unique_ptr<DkShader>, HashCargado> cargados_;  // nullptr: failed
++  // nfsmw_dk_memo_shaders (0.1.61): per stage (index 1 = vertex), the last ShaderDe arguments answered from cargados_
++  // and the last complete InfoDe entry.
++  struct MemoShader {
++    const EntradaShader* entrada = nullptr;
++    uint32_t especializacion = 0, salidas = 0, variante_ps = 0;
++    const DkShader* shader = nullptr;
++  };
++  std::array<MemoShader, 2> memo_shaders_{};
++  struct MemoInfo {
++    const EntradaShader* entrada = nullptr;
++    InfoShader* info = nullptr;
++  };
++  std::array<MemoInfo, 2> memo_info_{};
    deko::CacheDksh cache_;
 +  bool cache_dksh_dividida_ = false;
 +  deko::CacheDksh cache_dksh_nova_;
    bool cache_sucia_ = false;
    std::thread guardando_;  // writes the cache file (GuardarCacheSiHaceFalta)
    uint64_t cache_guardada_ns_ = 0;
-@@ -516,6 +792,7 @@ class RenderDk final : public DestinosNativos {
+@@ -516,6 +810,7 @@ class RenderDk final : public DestinosNativos {
    std::unordered_map<uint64_t, bool> en_fondo_;  // keys queued (by a hash of the key)
    DkShader fs_vacio_{};
    bool fs_vacio_valido_ = false;
@@ -1091,7 +1110,7 @@ index 4cffec3..c545951 100644
  
    // Vertex input (the same VS with the same patched fetches gives the same input)
    std::unordered_map<uint64_t, std::unique_ptr<EntradaVerticesDk>> entradas_;
-@@ -531,6 +808,7 @@ class RenderDk final : public DestinosNativos {
+@@ -531,6 +826,7 @@ class RenderDk final : public DestinosNativos {
      uint32_t pase_ancho = 0, pase_alto = 0;
      uint64_t pase_serie = 0;  // goes up at every pass change (the framing cache depends on it)
      const DkShader* vs = nullptr;
@@ -1099,7 +1118,7 @@ index 4cffec3..c545951 100644
      const DkShader* ps = nullptr;
      DkRasterizerState raster{};
      DkColorState color{};
-@@ -641,6 +919,8 @@ class RenderDk final : public DestinosNativos {
+@@ -641,23 +937,14 @@ class RenderDk final : public DestinosNativos {
    // Constants: the last upload of each block, valid within one slot
    uint64_t constantes_vs_generacion_ = UINT64_MAX, constantes_ps_generacion_ = UINT64_MAX;
    uint32_t constantes_vs_bytes_ = 0, constantes_ps_bytes_ = 0;
@@ -1107,22 +1126,28 @@ index 4cffec3..c545951 100644
 +  const EntradaShader* constantes_ps_literais_ = nullptr;
    DkGpuAddr constantes_vs_gpu_ = 0, constantes_ps_gpu_ = 0;
    uint64_t constantes_trabajo_ = UINT64_MAX;
-   // Constants by differences (nfsmw_dk_constantes_por_diferencias): one block per stage and work slot, written whole
-@@ -653,11 +933,11 @@ class RenderDk final : public DestinosNativos {
-   DkGpuAddr bloque_vs_ = 0, bloque_ps_ = 0, bloque_compartidas_ = 0;
-   std::array<uint32_t, 1024> sombra_vs_{};  // 256 registers
-   std::array<uint32_t, 896> sombra_ps_{};   // 224 registers
+-  // Constants by differences (nfsmw_dk_constantes_por_diferencias): one block per stage and work slot, written whole
+-  // once when the work starts and then kept in step with the game's registers by pushing only the 16-byte registers
+-  // that changed (dkCmdBufPushConstants: inline in the command list, in order with the draws). The game changes a
+-  // few registers per draw (a world matrix) and the copy of whole blocks into uncached memory was most of the ring
+-  // thread's "uploads" stage. The comparison is exact (against what was pushed); the generations only decide
+-  // whether to compare. The deferred sky keeps whole copies: later pushes would change what it reads.
+-  uint64_t bloques_trabajo_ = UINT64_MAX;
+-  DkGpuAddr bloque_vs_ = 0, bloque_ps_ = 0, bloque_compartidas_ = 0;
+-  std::array<uint32_t, 1024> sombra_vs_{};  // 256 registers
+-  std::array<uint32_t, 896> sombra_ps_{};   // 224 registers
 -  std::array<uint32_t, 128> sombra_compartidas_{};
-+  std::array<uint32_t, 340> sombra_compartidas_{};
-   uint64_t bloque_vs_generacion_ = UINT64_MAX, bloque_ps_generacion_ = UINT64_MAX;
-   uint32_t bloque_vs_cubierto_ = 0, bloque_ps_cubierto_ = 0;  // bytes compared at that generation
+-  uint64_t bloque_vs_generacion_ = UINT64_MAX, bloque_ps_generacion_ = UINT64_MAX;
+-  uint32_t bloque_vs_cubierto_ = 0, bloque_ps_cubierto_ = 0;  // bytes compared at that generation
++  // Constants by differences (nfsmw_dk_constantes_por_diferencias): removed in 0.1.61, its path never ran. The
++  // counters stay for the report (always 0 now).
    uint64_t registros_empujados_ = 0, empujes_ = 0, informe_registros_empujados_ = 0, informe_empujes_ = 0;
 -  static constexpr uint32_t kPalabrasCompartidas = 124;  // 31 float4: what the deko3d library declares
 +  static constexpr uint32_t kPalabrasCompartidas = 340;  // ReNut Deko3D: 85 uint4 (1360 bytes)
    uint32_t compartidas_previas_[kPalabrasCompartidas] = {};
    DkGpuAddr compartidas_gpu_ = 0;
    uint64_t compartidas_trabajo_ = UINT64_MAX;
-@@ -666,8 +946,8 @@ class RenderDk final : public DestinosNativos {
+@@ -666,8 +953,8 @@ class RenderDk final : public DestinosNativos {
    // Output: the guest output pass and the game's gamma ramp
    DkShader vs_salida_{};
    bool vs_salida_valido_ = false;
@@ -1133,7 +1158,7 @@ index 4cffec3..c545951 100644
    std::array<std::array<uint16_t, 3>, 256> rampa_juego_{};
    std::array<float, 256 * 4 + 8> rampa_valores_{};
    ImagenDk rampa_tabla_;     // the ramp as a 256x1 RGBA32F texture (kFsRampa)
-@@ -703,4 +983,8 @@ class RenderDk final : public DestinosNativos {
+@@ -703,4 +990,8 @@ class RenderDk final : public DestinosNativos {
  std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* proveedor, rex::memory::Memory* memoria,
                                                      rex::x360::RenderHooks& hooks);  // default in nfsmw_dk_destinos.h
  
@@ -1914,10 +1939,10 @@ index eefee0e..4e174bf 100644
  }
 diff --git a/src/audio/switch/audio_tempo.h b/src/audio/switch/audio_tempo.h
 new file mode 100644
-index 0000000..9dbfa15
+index 0000000..b377e89
 --- /dev/null
 +++ b/src/audio/switch/audio_tempo.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,115 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -1937,10 +1962,20 @@ index 0000000..9dbfa15
 +  static constexpr size_t kOutputFrames = 512;
 +  using InputBlock = std::array<float, kInputFrames * 2>;
 +
++  // continue_near_one (audio_switch_tempo_continuo): with the rate at or near 1 (search off), the next segment
++  // starts exactly where the previous one ended (last start + kOutputFrames) while that stays within kSearch of the
++  // source position, so the crossfade mixes the tail with the very same samples. Starting at floor(source position)
++  // put it 1-3 samples off at every seam (a comb filter). The source position still advances at the game's rate, so
++  // consumption follows production; when the two drift more than kSearch apart, one aligned search re-centres it.
 +  template <typename ReadInput>
-+  void Render(std::span<float, kOutputFrames * 2> output, float rate, ReadInput&& read) {
++  void Render(std::span<float, kOutputFrames * 2> output, float rate, ReadInput&& read,
++              bool continue_near_one = false) {
 +    const auto predicted = uint64_t(source_position_);
-+    const uint64_t search = warmed_up_ && rate < 0.995f ? kSearch : 0;
++    const bool near_one = continue_near_one && warmed_up_ && rate >= 0.995f && rate <= 1.0f;
++    const uint64_t next = last_start_ + kOutputFrames;
++    const bool continuous =
++        near_one && (next >= predicted ? next - predicted : predicted - next) <= kSearch;
++    const uint64_t search = warmed_up_ && (rate < 0.995f || near_one) ? kSearch : 0;
 +    while (source_end_ < predicted + search + kOutputFrames + kOverlap) {
 +      InputBlock block{};
 +      read(block.data());
@@ -1948,7 +1983,8 @@ index 0000000..9dbfa15
 +      source_end_ += kInputFrames;
 +    }
 +
-+    const uint64_t start = search ? FindAlignedStart(predicted) : predicted;
++    const uint64_t start = continuous ? next : (search ? FindAlignedStart(predicted) : predicted);
++    last_start_ = start;
 +    for (size_t frame = 0; frame < kOutputFrames; ++frame) {
 +      const auto sample = Sample(start + frame);
 +      if (warmed_up_ && frame < kOverlap) {
@@ -2017,12 +2053,13 @@ index 0000000..9dbfa15
 +  std::array<float, kOverlap * 2> tail_{};
 +  uint64_t source_end_ = 0;
 +  double source_position_ = 0;
++  uint64_t last_start_ = 0;  // where the previous segment began (its tail is at last_start_ + kOutputFrames)
 +  bool warmed_up_ = false;
 +};
 +
 +}  // namespace rex::audio::nx
 diff --git a/src/audio/switch/switch_audio_system.cpp b/src/audio/switch/switch_audio_system.cpp
-index 6a9dc8d..8068b22 100644
+index 6a9dc8d..e885450 100644
 --- a/src/audio/switch/switch_audio_system.cpp
 +++ b/src/audio/switch/switch_audio_system.cpp
 @@ -8,6 +8,8 @@
@@ -2034,7 +2071,7 @@ index 6a9dc8d..8068b22 100644
  #include <algorithm>
  #include <array>
  #include <atomic>
-@@ -29,15 +31,22 @@ extern "C" void RexSwitchPerfMax(unsigned id, u64 value);
+@@ -29,15 +31,34 @@ extern "C" void RexSwitchPerfMax(unsigned id, u64 value);
  
  REXCVAR_DEFINE_BOOL(audio_mute, false, "Audio", "Mute audio output");
  REXCVAR_DEFINE_BOOL(audio_switch_bomba, true, "Audio",
@@ -2062,10 +2099,22 @@ index 6a9dc8d..8068b22 100644
 +                     "10 = 53 ms, 6 up to build 105). A longer queue lets the game be late without cutting "
 +                     "the output, at the cost of latency (nfsmw_audio_esperar_servidor_ms waits up to "
 +                     "30 ms); read when audio is opened");
++REXCVAR_DEFINE_BOOL(audio_switch_tempo_continuo, true, "Audio",
++                    "Effects tempo: at a rate of 0.995 or more (no waveform search), start each segment exactly "
++                    "where the previous one ended, so the seam crossfade mixes identical samples (no comb-filter "
++                    "buzz near full speed); false = start at the rounded source position, as before");
++REXCVAR_DEFINE_BOOL(audio_switch_cola_por_tempo, true, "Audio",
++                    "With audio_switch_bomba: scale the effects queue target by the effects rate, so the cushion "
++                    "stays the same in output time and the effects do not fall further behind the picture when "
++                    "the game slows down (identical at rate 1.0; music is never touched); false = the same number "
++                    "of frames at any rate, as before");
++REXCVAR_DEFINE_BOOL(audio_switch_retardo_suave, true, "Audio",
++                    "When the output delay changes, crossfade from the old read position to the new one over 128 "
++                    "samples instead of jumping (click); false = jump at once, as before");
  
  namespace rex::audio::nx {
  
-@@ -49,7 +58,11 @@ namespace {
+@@ -49,7 +70,11 @@ namespace {
  constexpr uint32_t kFramesPerBuffer = 4;
  constexpr uint32_t kBufferCount = 3;
  constexpr uint32_t kBufferSamples = kFramesPerBuffer * SwitchAudioDriver::kChannelSamples;
@@ -2077,7 +2126,7 @@ index 6a9dc8d..8068b22 100644
  // audout wants page-aligned sample memory.
  constexpr uint32_t kBufferAllocBytes = (kBufferBytes + 0xFFF) & ~0xFFFu;
  
-@@ -62,12 +75,42 @@ constexpr u64 kWaitTimeoutNs = 100'000'000;
+@@ -62,12 +87,42 @@ constexpr u64 kWaitTimeoutNs = 100'000'000;
  // audio_switch_bomba: one frame (256 samples) every 5.333 ms with absolute deadlines. With this many
  // frames queued or fewer, another one is requested on each tick, and below the minimum one more is
  // requested to catch up (the system clock and the audio clock do not match exactly).
@@ -2121,7 +2170,7 @@ index 6a9dc8d..8068b22 100644
  /* --- driver ------------------------------------------------------------------ */
  
  SwitchAudioDriver::SwitchAudioDriver(memory::Memory* memory, rex::thread::Semaphore* semaphore)
-@@ -105,19 +148,73 @@ void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
+@@ -105,19 +160,73 @@ void SwitchAudioDriver::SubmitFrame(uint32_t frame_ptr) {
  }
  
  bool SwitchAudioDriver::MixFrameInto(float* stereo_out, const StereoFold& fold, float gain,
@@ -2199,19 +2248,21 @@ index 6a9dc8d..8068b22 100644
    for (size_t i = 0; i < folded.size(); ++i) {
      stereo_out[i] += folded[i];
    }
-@@ -157,6 +254,11 @@ struct SwitchAudioSystem::Output {
+@@ -157,6 +266,13 @@ struct SwitchAudioSystem::Output {
    std::array<AudioOutBuffer, kBufferCount> buffers{};
    std::array<s16*, kBufferCount> samples{};
    std::array<float, kBufferSamples * 2> mix{};
 +  AudioTempo tempo;
 +  std::array<float, kDelayHistorySamples> delay_history{};
 +  size_t delay_write = 0;
++  size_t delay_samples = 0;     // audio_switch_retardo_suave: the delay of the previous buffer
 +  uint64_t last_tempo_report = 0;
 +  bool battle_clock_active = false;
++  float effects_rate = 1.0f;    // the last effects rate, for PumpTick (same thread)
  };
  
  std::unique_ptr<AudioSystem> SwitchAudioSystem::Create(
-@@ -171,7 +273,7 @@ SwitchAudioSystem::~SwitchAudioSystem() {
+@@ -171,7 +287,7 @@ SwitchAudioSystem::~SwitchAudioSystem() {
    StopOutput();
  }
  
@@ -2220,7 +2271,7 @@ index 6a9dc8d..8068b22 100644
                                           rex::thread::Semaphore* semaphore,
                                           AudioDriver** out_driver) {
    assert_not_null(out_driver);
-@@ -181,10 +283,13 @@ X_STATUS SwitchAudioSystem::CreateDriver([[maybe_unused]] size_t index,
+@@ -181,10 +297,13 @@ X_STATUS SwitchAudioSystem::CreateDriver([[maybe_unused]] size_t index,
      return X_STATUS_UNSUCCESSFUL;
    }
    auto driver = new SwitchAudioDriver(memory_, semaphore);
@@ -2234,7 +2285,7 @@ index 6a9dc8d..8068b22 100644
    *out_driver = driver;
    return X_STATUS_SUCCESS;
  }
-@@ -194,6 +299,7 @@ void SwitchAudioSystem::DestroyDriver(AudioDriver* driver) {
+@@ -194,6 +313,7 @@ void SwitchAudioSystem::DestroyDriver(AudioDriver* driver) {
    auto switch_driver = static_cast<SwitchAudioDriver*>(driver);
    {
      std::lock_guard<std::mutex> guard(drivers_mutex_);
@@ -2242,7 +2293,7 @@ index 6a9dc8d..8068b22 100644
      drivers_.erase(std::remove(drivers_.begin(), drivers_.end(), switch_driver), drivers_.end());
    }
    delete switch_driver;
-@@ -203,7 +309,7 @@ bool SwitchAudioSystem::StartOutput() {
+@@ -203,7 +323,7 @@ bool SwitchAudioSystem::StartOutput() {
    auto output = std::make_unique<Output>();
    output->pump = REXCVAR_GET(audio_switch_bomba);
    output->tramas_en_cola = static_cast<size_t>(std::clamp(REXCVAR_GET(audio_switch_tramas_en_cola), 2, 32));
@@ -2251,7 +2302,7 @@ index 6a9dc8d..8068b22 100644
                output->tramas_en_cola);
  
    Result rc = audoutInitialize();
-@@ -214,7 +320,7 @@ bool SwitchAudioSystem::StartOutput() {
+@@ -214,7 +334,7 @@ bool SwitchAudioSystem::StartOutput() {
    output->audout_initialized = true;
    REXLOG_INFO("SwitchAudioSystem: audout {} Hz, {} channels, PCM format {}",
                audoutGetSampleRate(), audoutGetChannelCount(), int(audoutGetPcmFormat()));
@@ -2260,20 +2311,24 @@ index 6a9dc8d..8068b22 100644
        audoutGetPcmFormat() != PcmFormat_Int16) {
      REXLOG_ERROR("SwitchAudioSystem: unexpected audout format");
      audoutExit();
-@@ -293,43 +399,75 @@ void SwitchAudioSystem::StopOutput() {
+@@ -293,43 +413,98 @@ void SwitchAudioSystem::StopOutput() {
  
  void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
    Output& output = *output_;
 -  output.mix.fill(0.0f);
 +  const uint64_t last_frame = last_battle_frame.load(std::memory_order_relaxed);
 +  const uint64_t now = armGetSystemTick();
-+  const bool active = last_frame && armTicksToNs(now - last_frame) < kStaleBattleFrameNs;
++  // A frame stored by the game thread can read a few ticks ahead of this thread's clock: that frame is fresh,
++  // not a wrapped subtraction.
++  const bool active =
++      last_frame && (now <= last_frame || armTicksToNs(now - last_frame) < kStaleBattleFrameNs);
 +  const uint64_t frame_ns = battle_frame_ns.load(std::memory_order_relaxed);
 +  // At 24 steps per second, the old 0.5 floor played the effects at 30.
 +  // Let effects follow heavier scenes when music has its own clock.
 +  const bool separate_music = music_render_client.load(std::memory_order_relaxed) != SIZE_MAX;
 +  const float min_rate = separate_music ? 0.375f : 0.5f;
 +  const float rate = active ? std::clamp(float(kBattleFrameNs) / float(frame_ns), min_rate, 1.0f) : 1.0f;
++  output.effects_rate = rate;
 +  if (active != output.battle_clock_active ||
 +      (active && armTicksToNs(now - output.last_tempo_report) >= 2'000'000'000ull)) {
 +    REXLOG_INFO("[B3 audio sync] battle={} frames/s={:.1f} effects_rate={:.3f}", active,
@@ -2288,6 +2343,17 @@ index 6a9dc8d..8068b22 100644
 +  const size_t delay_samples = size_t(output_delay_ms.load(std::memory_order_relaxed)) *
 +                               (kOutputSampleRate / 1000) * 2;
 +  size_t delay_read = (output.delay_write + kDelayHistorySamples - delay_samples) % kDelayHistorySamples;
++  // audio_switch_retardo_suave: on a delay change the old read head keeps going for kDelayFadeFrames and the
++  // output crossfades from it to the new one.
++  constexpr size_t kDelayFadeFrames = 128;
++  size_t delay_fade_left = 0;
++  size_t delay_read_old = 0;
++  if (delay_samples != output.delay_samples && REXCVAR_GET(audio_switch_retardo_suave)) {
++    delay_fade_left = kDelayFadeFrames * 2;
++    delay_read_old = (output.delay_write + kDelayHistorySamples - output.delay_samples) % kDelayHistorySamples;
++  }
++  output.delay_samples = delay_samples;
++  const bool tempo_continuo = REXCVAR_GET(audio_switch_tempo_continuo);
    uint32_t frames_mixed = 0;
    uint32_t frames_missing = 0;
 -  {
@@ -2316,10 +2382,18 @@ index 6a9dc8d..8068b22 100644
 -        }
 +        if (driver != music_driver_) mix_frame(*driver, out);
 +      }
-+    });
++    }, tempo_continuo);
 +    for (float& sample : block) {
 +      output.delay_history[output.delay_write] = sample;
 +      sample = output.delay_history[delay_read];
++      if (delay_fade_left) {
++        // Samples are interleaved stereo: the weight steps once per frame.
++        const size_t done = kDelayFadeFrames * 2 - delay_fade_left;
++        const float t = float(done / 2 + 1) / float(kDelayFadeFrames);
++        sample = output.delay_history[delay_read_old] * (1.0f - t) + sample * t;
++        if (++delay_read_old == kDelayHistorySamples) delay_read_old = 0;
++        --delay_fade_left;
++      }
 +      if (++output.delay_write == kDelayHistorySamples) output.delay_write = 0;
 +      if (++delay_read == kDelayHistorySamples) delay_read = 0;
 +    }
@@ -2359,6 +2433,27 @@ index 6a9dc8d..8068b22 100644
    }
    RexSwitchPerfAdd(21, saturadas);
    RexSwitchPerfAdd(22, pico >= 0.98f ? 1 : 0);
+@@ -349,10 +524,19 @@ void SwitchAudioSystem::FillAndAppend(size_t buffer_index) {
+ }
+ 
+ void SwitchAudioSystem::PumpTick() {
++  // audio_switch_cola_por_tempo: the effects tempo consumes `rate` frames per period, so a target kept in frames
++  // grows the effects latency as 1/rate. Scaled, the cushion stays the same in output time. At rate 1.0 the target
++  // is exactly tramas_en_cola, as before.
++  size_t objetivo_efectos = output_->tramas_en_cola;
++  if (REXCVAR_GET(audio_switch_cola_por_tempo) && output_->effects_rate < 1.0f) {
++    objetivo_efectos = std::max(kMinQueuedFrames,
++                                size_t(float(output_->tramas_en_cola) * output_->effects_rate + 0.5f));
++  }
+   std::lock_guard<std::mutex> guard(drivers_mutex_);
+   for (SwitchAudioDriver* driver : drivers_) {
+     const size_t queued = driver->QueuedFrames();
+-    if (queued <= output_->tramas_en_cola) {
++    const size_t objetivo = driver == music_driver_ ? output_->tramas_en_cola : objetivo_efectos;
++    if (queued <= objetivo) {
+       driver->RequestFrame();
+     }
+     if (queued < kMinQueuedFrames) {
 diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
 index a902d01..5485a89 100644
 --- a/src/audio/xma_context.cpp
@@ -2375,10 +2470,20 @@ index a902d01..5485a89 100644
  }
  
 diff --git a/src/audio/xma_decoder.cpp b/src/audio/xma_decoder.cpp
-index 3a1bebb..5c1ec44 100644
+index 3a1bebb..5dad40e 100644
 --- a/src/audio/xma_decoder.cpp
 +++ b/src/audio/xma_decoder.cpp
-@@ -231,6 +231,19 @@ void MarcarPendiente(uint32_t context_id) {
+@@ -36,6 +36,9 @@ REXCVAR_DEFINE_BOOL(audio_ffmpeg_simd, true, "Audio",
+                     "Diagnostico: false = el decodificador XMA de FFmpeg usa solo codigo C, sin "
+                     "NEON ni SSE (para comparar el audio)");
+ REXCVAR_DECLARE(bool, audio_diag_prioridad_critica);  // definida en audio_system.cpp
++// xboxkrnl_io.cpp. The [xma] timing (clock reads and counters on every kick, lock and worker decode) only runs with
++// the periodic reports on; it is diagnostics only and never changes what is decoded.
++REXCVAR_DECLARE(bool, nfsmw_dk_informe_periodico);
+ /*
+  * On by default only on the Switch, like the server priority and the frame wait: there the game's
+  * audio server thread runs at 0x2D, below the GPU ring (0x2C), and the ring preempts it in the middle
+@@ -231,6 +234,19 @@ void MarcarPendiente(uint32_t context_id) {
    g_pendientes[context_id / 32].fetch_or(1u << (context_id % 32), std::memory_order_release);
  }
  
@@ -2398,7 +2503,45 @@ index 3a1bebb..5c1ec44 100644
  // Returns true if this thread takes the context; only one can.
  bool TomarPendiente(uint32_t context_id) {
    const uint32_t bit = 1u << (context_id % 32);
-@@ -357,8 +370,15 @@ void XmaDecoder::WorkerThreadMain() {
+@@ -300,6 +316,7 @@ void XmaDecoder::WorkerThreadMain() {
+     // First the ones a kick has just enabled: they are reached without walking all 320 or touching their
+     // locks.
+     bool habia_pendientes = false;
++    const bool medir = REXCVAR_GET(nfsmw_dk_informe_periodico);
+     for (uint32_t palabra = 0; palabra < kPalabrasPendientes && worker_running_; ++palabra) {
+       uint32_t bits = g_pendientes[palabra].load(std::memory_order_acquire);
+       uint32_t indice = 0;
+@@ -310,21 +327,23 @@ void XmaDecoder::WorkerThreadMain() {
+           continue;  // the kick thread took it (mode 2)
+         }
+         habia_pendientes = true;
+-        const auto antes = std::chrono::steady_clock::now();
++        const auto antes = medir ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+         XmaContext& context = contexts_[n];
+         const bool worked = context.Work();
+-        const uint64_t ns = DesdeNs(antes);
+         if (worked) {
+           context.SignalWorkDone();
+           PROFILE_XMA_FRAME_DECODED();
+-          g_medida_xma.contextos_trabajador.fetch_add(1, std::memory_order_relaxed);
+-          g_medida_xma.trabajo_ns.fetch_add(ns, std::memory_order_relaxed);
+-          MaximoXma(g_medida_xma.trabajo_max_ns, ns);
++          if (medir) {
++            const uint64_t ns = DesdeNs(antes);
++            g_medida_xma.contextos_trabajador.fetch_add(1, std::memory_order_relaxed);
++            g_medida_xma.trabajo_ns.fetch_add(ns, std::memory_order_relaxed);
++            MaximoXma(g_medida_xma.trabajo_max_ns, ns);
++          }
+         }
+         did_work = did_work || worked;
+       }
+     }
+-    if (habia_pendientes) {
++    if (habia_pendientes && medir) {
+       // From the kick to the data being written: the latency the game could notice.
+       const int64_t desde = g_pendiente_desde_ns.load(std::memory_order_acquire);
+       if (desde) {
+@@ -357,8 +376,15 @@ void XmaDecoder::WorkerThreadMain() {
      if (did_work) {
        continue;
      }
@@ -2415,11 +2558,25 @@ index 3a1bebb..5c1ec44 100644
    }
  }
  
-@@ -514,7 +534,10 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+@@ -504,7 +530,8 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+      * notifications but polls the context sleeping 50 us per iteration, finds the data already written.
+      */
+     const int32_t modo_trabajador = REXCVAR_GET(audio_xma_en_trabajador);
+-    const auto kick_antes = std::chrono::steady_clock::now();
++    const bool medir = REXCVAR_GET(nfsmw_dk_informe_periodico);
++    const auto kick_antes = medir ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     uint64_t kick_contextos = 0;
+     if (modo_trabajador != 0) {
+       uint32_t marcados = kicked_value;
+@@ -513,8 +540,13 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+           MarcarPendiente(base_context_id + i);
          }
        }
-       g_pendiente_desde_ns.store(AhoraNs(), std::memory_order_release);
+-      g_pendiente_desde_ns.store(AhoraNs(), std::memory_order_release);
 -      work_event_->Set();
++      if (medir) {
++        g_pendiente_desde_ns.store(AhoraNs(), std::memory_order_release);
++      }
 +      std::atomic_thread_fence(std::memory_order_seq_cst);
 +      if (g_trabajador_dormido.exchange(false, std::memory_order_acq_rel)) {
 +        work_event_->Set();
@@ -2427,6 +2584,73 @@ index 3a1bebb..5c1ec44 100644
      }
      for (int i = 0; kicked_value && i < 32; ++i, kicked_value >>= 1) {
        if (kicked_value & 1) {
+@@ -529,7 +561,7 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+           continue;  // the worker has taken it
+         }
+         ++kick_contextos;
+-        if (modo_trabajador != 0) {
++        if (medir && modo_trabajador != 0) {
+           g_medida_xma.contextos_respaldo.fetch_add(1, std::memory_order_relaxed);
+         }
+         if (context.Work()) {
+@@ -538,24 +570,29 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+       }
+     }
+     // Measurement only: how much decoding right here costs the thread requesting the kick.
+-    const uint64_t kick_ns = DesdeNs(kick_antes);
+-    g_medida_xma.kicks.fetch_add(1, std::memory_order_relaxed);
+-    g_medida_xma.kick_contextos.fetch_add(kick_contextos, std::memory_order_relaxed);
+-    g_medida_xma.kick_ns.fetch_add(kick_ns, std::memory_order_relaxed);
+-    MaximoXma(g_medida_xma.kick_max_ns, kick_ns);
++    if (medir) {
++      const uint64_t kick_ns = DesdeNs(kick_antes);
++      g_medida_xma.kicks.fetch_add(1, std::memory_order_relaxed);
++      g_medida_xma.kick_contextos.fetch_add(kick_contextos, std::memory_order_relaxed);
++      g_medida_xma.kick_ns.fetch_add(kick_ns, std::memory_order_relaxed);
++      MaximoXma(g_medida_xma.kick_max_ns, kick_ns);
++    }
+     if (modo_trabajador == 0) {
+       // With the worker already notified above, repeating the notification leaves the (auto-reset) event
+       // signaled after its iteration and costs a full sweep of the 320 contexts per kick, 1,555 times per
+       // second.
+       work_event_->Set();
+     }
+-    InformarXma();
++    if (medir) {
++      InformarXma();
++    }
+   } else if (r >= XmaRegister::Context0Lock && r <= XmaRegister::Context9Lock) {
+     // Context lock command.
+     // This requests a lock by flagging the context.
+     // XMADisableContext
+     uint32_t base_context_id = (r - XmaRegister::Context0Lock) * 32;
+-    const auto lock_antes = std::chrono::steady_clock::now();
++    const bool medir = REXCVAR_GET(nfsmw_dk_informe_periodico);
++    const auto lock_antes = medir ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     uint64_t lock_contextos = 0;
+     for (int i = 0; value && i < 32; ++i, value >>= 1) {
+       if (value & 1) {
+@@ -572,12 +609,14 @@ void XmaDecoder::WriteRegister(uint32_t addr, uint32_t value) {
+     }
+     // Measurement only: how long the thread requesting the lock waits for the worker to release the
+     // context.
+-    const uint64_t lock_ns = DesdeNs(lock_antes);
+-    g_medida_xma.locks.fetch_add(1, std::memory_order_relaxed);
+-    g_medida_xma.lock_contextos.fetch_add(lock_contextos, std::memory_order_relaxed);
+-    g_medida_xma.lock_ns.fetch_add(lock_ns, std::memory_order_relaxed);
+-    MaximoXma(g_medida_xma.lock_max_ns, lock_ns);
+-    InformarXma();
++    if (medir) {
++      const uint64_t lock_ns = DesdeNs(lock_antes);
++      g_medida_xma.locks.fetch_add(1, std::memory_order_relaxed);
++      g_medida_xma.lock_contextos.fetch_add(lock_contextos, std::memory_order_relaxed);
++      g_medida_xma.lock_ns.fetch_add(lock_ns, std::memory_order_relaxed);
++      MaximoXma(g_medida_xma.lock_max_ns, lock_ns);
++      InformarXma();
++    }
+     // Signal the decoder thread to start processing.
+     // work_event_->Set();
+   } else if (r >= XmaRegister::Context0Clear && r <= XmaRegister::Context9Clear) {
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
 index aa8992e..617315e 100644
 --- a/src/core/CMakeLists.txt
@@ -2443,7 +2667,7 @@ index aa8992e..617315e 100644
      # Apple's libc++ still gates std::jthread/std::stop_token behind the
      # experimental-library feature flag. Only timer_queue.cpp uses them, and
 diff --git a/src/core/clock.cpp b/src/core/clock.cpp
-index ae72b7a..3e9d50f 100644
+index ae72b7a..242a78e 100644
 --- a/src/core/clock.cpp
 +++ b/src/core/clock.cpp
 @@ -10,6 +10,7 @@
@@ -2454,12 +2678,36 @@ index ae72b7a..3e9d50f 100644
  #include <limits>
  #include <mutex>
  
-@@ -36,10 +37,13 @@ uint64_t guest_system_time_base_ = Clock::QueryHostSystemTime();
+@@ -22,6 +23,12 @@ REXCVAR_DEFINE_BOOL(clock_no_scaling, false, "Clock",
+ 
+ REXCVAR_DEFINE_BOOL(clock_source_raw, false, "Clock", "Use raw clock source without scaling");
+ 
++REXCVAR_DEFINE_BOOL(rex_reloj_sin_perdida, true, "Clock",
++                    "Guest timebase without rounding loss: the claimed host ticks are accumulated and the guest "
++                    "count is derived from the total, so frequent mftb reads no longer make guest time run a few "
++                    "percent slow. false = each claim is converted and truncated on its own, as before. Change it "
++                    "only before starting the game");
++
+ namespace rex::chrono {
+ 
+ // Time scalar applied to all time operations.
+@@ -36,10 +43,24 @@ uint64_t guest_system_time_base_ = Clock::QueryHostSystemTime();
  std::pair<uint64_t, uint64_t> guest_tick_ratio_ = std::make_pair(1, 1);
  
  // Native guest ticks.
 -uint64_t last_guest_tick_count_ = 0;
 +std::atomic<uint64_t> last_guest_tick_count_{0};
++// rex_reloj_sin_perdida: host ticks claimed so far (each claim clamped like the guest delta). The guest count is
++// derived from this total, so the remainder of the 125/48 conversion is never thrown away.
++std::atomic<uint64_t> claimed_host_tick_count_{0};
++
++namespace {
++// value * num / den without the 64-bit overflow of value * num (exact as long as (den - 1) * num fits in 64 bits,
++// which holds for the reduced host/guest ratio).
++inline uint64_t MulDivExact(uint64_t value, uint64_t num, uint64_t den) {
++  return (value / den) * num + (value % den) * num / den;
++}
++}  // namespace
  // Last sampled host tick count.
 -uint64_t last_host_tick_count_ = Clock::QueryHostTickCount();
 -// Mutex to ensure last_host_tick_count_ and last_guest_tick_count_ are in sync
@@ -2471,7 +2719,7 @@ index ae72b7a..3e9d50f 100644
  std::mutex tick_mutex_;
  
  void RecomputeGuestTickScalar() {
-@@ -62,7 +66,7 @@ void RecomputeGuestTickScalar() {
+@@ -62,7 +83,7 @@ void RecomputeGuestTickScalar() {
  }
  
  // Update the guest timer for all threads.
@@ -2480,7 +2728,7 @@ index ae72b7a..3e9d50f 100644
  uint64_t UpdateGuestClock() {
    uint64_t host_tick_count = Clock::QueryHostTickCount();
  
-@@ -71,21 +75,25 @@ uint64_t UpdateGuestClock() {
+@@ -71,21 +92,37 @@ uint64_t UpdateGuestClock() {
      return host_tick_count * guest_tick_ratio_.first / guest_tick_ratio_.second;
    }
  
@@ -2504,9 +2752,14 @@ index ae72b7a..3e9d50f 100644
 +  while (host_tick_count > previous &&
 +         !last_host_tick_count_.compare_exchange_weak(previous, host_tick_count, std::memory_order_relaxed)) {
 +  }
++  const bool sin_perdida = REXCVAR_GET(rex_reloj_sin_perdida);
 +  if (host_tick_count <= previous) {
++    if (sin_perdida) {
++      const auto ratio = guest_tick_ratio_;
++      return MulDivExact(claimed_host_tick_count_.load(std::memory_order_acquire), ratio.first, ratio.second);
++    }
 +    return last_guest_tick_count_.load(std::memory_order_acquire);
-   }
++  }
 +  // The guest never saw its console sleep: while the process is suspended (Switch sleep or
 +  // HOME) no thread reads the clock, so the first read after it would carry the whole nap in
 +  // one step, and games take that as one enormous frame (Dead Space 2's RenderWare Audio crashed
@@ -2515,11 +2768,80 @@ index ae72b7a..3e9d50f 100644
 +  const uint64_t max_host_tick_delta = Clock::QueryHostTickFrequency() / 4;
 +  const uint64_t host_tick_delta = std::min(host_tick_count - previous, max_host_tick_delta);
 +  const auto ratio = guest_tick_ratio_;
++  if (sin_perdida) {
++    // The running total is converted, not each claim: exact, and monotonic because the total only grows (the
++    // guest ratio is set at startup, before the guest reads the clock).
++    const uint64_t total = claimed_host_tick_count_.fetch_add(host_tick_delta, std::memory_order_acq_rel) +
++                           host_tick_delta;
++    return MulDivExact(total, ratio.first, ratio.second);
+   }
 +  const uint64_t guest_tick_delta = host_tick_delta * ratio.first / ratio.second;
 +  return last_guest_tick_count_.fetch_add(guest_tick_delta, std::memory_order_acq_rel) + guest_tick_delta;
  }
  
  // Offset of the current guest system file time relative to the guest base time.
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..eb691b9 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -15,6 +15,7 @@
+ #include <mutex>
+ #include <optional>
+ #include <string_view>
++#include <system_error>
+ #include <unordered_map>
+ 
+ #include <CLI/CLI.hpp>
+@@ -698,13 +699,43 @@ void SaveConfig(const std::filesystem::path& config_path) {
+   }
+ 
+   try {
+-    std::ofstream file(config_path);
+-    if (!file) {
+-      REXLOG_ERROR("SaveConfig: failed to open {}", config_path.string());
+-      return;
++    // Written to a temporary file next to it and moved over the original only once complete: truncating in place
++    // left an empty or half-written config if the console lost power or the write failed midway.
++    std::filesystem::path temporary_path = config_path;
++    temporary_path += ".tmp";
++    {
++      std::ofstream file(temporary_path, std::ios::binary | std::ios::trunc);
++      if (!file) {
++        REXLOG_ERROR("SaveConfig: failed to open {}", temporary_path.string());
++        return;
++      }
++      file << "# Auto-generated cvar configuration\n";
++      file << content;
++      file.flush();
++      file.close();
++      if (file.fail()) {
++        std::error_code ec;
++        std::filesystem::remove(temporary_path, ec);
++        REXLOG_ERROR("SaveConfig: failed to write {}; {} kept as it was", temporary_path.string(),
++                     config_path.string());
++        return;
++      }
++    }
++    std::error_code ec;
++    std::filesystem::rename(temporary_path, config_path, ec);
++    if (ec) {
++      // Renaming over an existing file can fail (FAT on the Switch's SD card): remove the original first. The new
++      // content is complete in the temporary file at this point.
++      ec.clear();
++      std::filesystem::remove(config_path, ec);
++      ec.clear();
++      std::filesystem::rename(temporary_path, config_path, ec);
++      if (ec) {
++        REXLOG_ERROR("SaveConfig: could not move {} to {}: {}", temporary_path.string(), config_path.string(),
++                     ec.message());
++        return;
++      }
+     }
+-    file << "# Auto-generated cvar configuration\n";
+-    file << content;
+     REXLOG_INFO("Saved config to {}", config_path.string());
+   } catch (const std::exception& e) {
+     REXLOG_ERROR("SaveConfig: {}", e.what());
 diff --git a/src/core/guest_memory_switch.cpp b/src/core/guest_memory_switch.cpp
 index 34cd4ed..c1e56bd 100644
 --- a/src/core/guest_memory_switch.cpp
@@ -2559,8 +2881,41 @@ index 34cd4ed..c1e56bd 100644
  
      size_t cur = begin;
      while (cur < end) {
+diff --git a/src/core/logging.cpp b/src/core/logging.cpp
+index 2097fed..8ca5cd0 100644
+--- a/src/core/logging.cpp
++++ b/src/core/logging.cpp
+@@ -40,6 +40,17 @@ REXCVAR_DEFINE_STRING(log_level, "info", "Log",
+ 
+ REXCVAR_DEFINE_STRING(log_file, "", "Log", "Log file path (empty = auto sequential naming)");
+ 
++// On the Switch nothing is written to the SD card unless the user asks for it (the files pile up, one per session).
++#if defined(__SWITCH__)
++REXCVAR_DEFINE_BOOL(log_to_file, false, "Log",
++                    "Write the log (and the performance report) to files under logs/. Off: nothing is written.");
++#else
++REXCVAR_DEFINE_BOOL(log_to_file, true, "Log", "Write the log to a file.");
++#endif
++
++// For code built without the cvar headers (switch_perf.cpp).
++extern "C" bool RexLogToFileEnabled(void) { return REXCVAR_GET(log_to_file); }
++
+ REXCVAR_DEFINE_BOOL(log_verbose, false, "Log", "Enable verbose logging (sets level to trace)")
+     .debug_only();
+ 
+@@ -283,7 +294,9 @@ void InitLogging(const LogConfig& config) {
+ 
+   // File sink (rotating) with sequential naming fallback
+   std::string resolved_path;
+-  if (config.log_file) {
++  if (!REXCVAR_GET(log_to_file)) {
++    // No file sink at all.
++  } else if (config.log_file) {
+     resolved_path = config.log_file;
+   } else if (!config.app_name.empty()) {
+     auto log_dir = config.log_dir.empty() ? std::filesystem::current_path() / "logs"
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 5d26022..e619594 100644
+index 5d26022..aaeb1a3 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
 @@ -17,6 +17,7 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
@@ -2571,9 +2926,18 @@ index 5d26022..e619594 100644
  #include <ctime>
  #include <deque>
  #include <limits>
-@@ -202,7 +203,33 @@ uint32_t current_thread_system_id() {
+@@ -201,11 +202,55 @@ uint32_t current_thread_system_id() {
+ #endif
  }
  
++#if defined(__SWITCH__)
++namespace {
++// MaybeYield's polling detector, per thread (see MaybeYield).
++thread_local std::chrono::steady_clock::time_point anterior{};
++thread_local uint32_t seguidos = 0;
++}  // namespace
++#endif
++
  void MaybeYield() {
 +#if defined(__SWITCH__)
 +  /*
@@ -2583,8 +2947,6 @@ index 5d26022..e619594 100644
 +   * core of a 3-core process that is CPU-bound. A thread that yields again within 20 us, more than 16 times in a row,
 +   * is polling: from then on it sleeps 100 us per call. A lone yield, or the first few of a short wait, is unchanged.
 +   */
-+  thread_local std::chrono::steady_clock::time_point anterior{};
-+  thread_local uint32_t seguidos = 0;
 +  const auto ahora = std::chrono::steady_clock::now();
 +  if (ahora - anterior < std::chrono::microseconds(20)) {
 +    ++seguidos;
@@ -2605,6 +2967,35 @@ index 5d26022..e619594 100644
    __sync_synchronize();
  }
  
++}  // namespace rex::thread
++
++#if defined(__SWITCH__)
++// threading_switch.h. A new kernel spinlock wait starts with a clean polling count, so a thread that was polling
++// something else just before does not pay the 100 us sleep on its first spinlock attempts.
++extern "C" void RexSwitchResetYieldBackoff(void) {
++  rex::thread::seguidos = 0;
++}
++#endif
++
++namespace rex::thread {
++
+ void SyncMemory() {
+   __sync_synchronize();
+ }
+diff --git a/src/core/threading_switch.h b/src/core/threading_switch.h
+index 9560d3d..04493f6 100644
+--- a/src/core/threading_switch.h
++++ b/src/core/threading_switch.h
+@@ -169,6 +169,9 @@ bool RexSwitchPinCurrentThreadToCore(int core);
+ /* Which core the calling thread is running on right now. It can only be asked about oneself. */
+ int RexSwitchCurrentCore(void);
+ 
++/* Clears the calling thread's MaybeYield polling count (threading_posix.cpp). */
++void RexSwitchResetYieldBackoff(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/src/core/threading_win.cpp b/src/core/threading_win.cpp
 index 896dfec..463daaf 100644
 --- a/src/core/threading_win.cpp
@@ -2729,10 +3120,10 @@ index cc726b7..ed90f71 100644
          if (instr.is_normalized()) {
            for (uint32_t i = 0; i < 4; ++i) {
 diff --git a/src/input/switch/switch_input_driver.cpp b/src/input/switch/switch_input_driver.cpp
-index ccf5e2a..9226a2e 100644
+index ccf5e2a..fb26f96 100644
 --- a/src/input/switch/switch_input_driver.cpp
 +++ b/src/input/switch/switch_input_driver.cpp
-@@ -18,11 +18,42 @@
+@@ -18,11 +18,46 @@
  #include <rex/cvar.h>
  #include <rex/logging.h>
  #include <rex/ui/keybinds.h>
@@ -2744,6 +3135,10 @@ index ccf5e2a..9226a2e 100644
 +                    "ZL + ZR + arriba lo enciende y apaga");
 +REXCVAR_DEFINE_BOOL(switch_atajo_perfil_app, false, "UI/Switch",
 +                    "Activa los atajos de perfiles (+ y -) y ajustes (L + R + derecha) de la aplicacion.");
++REXCVAR_DEFINE_BOOL(switch_atajo_retener_botones, true, "UI/Switch",
++                    "With switch_atajo_perfil_app: after an app chord (+ and -, L + R + right) fires, keep its buttons "
++                    "hidden from the game until each one is released, so letting one go first does not leak a press "
++                    "of the others (Plus opening the pause menu); false = hidden only while the whole chord is held");
 +REXCVAR_DEFINE_BOOL(switch_atajos_depuracion, false, "UI/Switch",
 +                    "Los atajos de depuracion con ZL + ZR (capturas, volcados, modos de omision, menus del SDK, "
 +                    "muestreo de pilas, vuelta A/B). false = solo ZL + ZR + arriba, el contador de FPS");
@@ -2775,7 +3170,7 @@ index ccf5e2a..9226a2e 100644
  // Face buttons (1.0.1). By default each Switch button acts as the Xbox 360 button with the same
  // letter: A accepts and B goes back, as in other Switch games. With true they go by position, as on
  // an Xbox pad: the bottom one (B on the Switch) acts as A, the mapping of 1.0.0. It applies at once;
-@@ -31,6 +62,11 @@ REXCVAR_DEFINE_BOOL(input_xbox_layout, false, "Input",
+@@ -31,6 +66,11 @@ REXCVAR_DEFINE_BOOL(input_xbox_layout, false, "Input",
                      "Face buttons by position, as on an Xbox pad (the bottom button, B, acts as A). "
                      "false = by letter: A accepts and B goes back");
  
@@ -2787,7 +3182,17 @@ index ccf5e2a..9226a2e 100644
  namespace rex::ui {
  // rex/ui/overlay/debug_overlay.h (not included here because it pulls in ImGui).
  bool DebugOverlayAbierto();
-@@ -271,6 +307,20 @@ X_STATUS SwitchInputDriver::Setup() {
+@@ -197,6 +237,9 @@ struct SwitchInputDriver::Slot {
+    * See DispatchMenuShortcuts.
+    */
+   uint64_t menu_shortcuts = 0;
++  // switch_atajo_retener_botones: buttons of an app chord that fired, hidden from the game until each one is
++  // released (see Poll).
++  uint64_t chord_suppress = 0;
+ 
+   // Keystroke synthesis, per pad rather than per guest user.
+   uint64_t key_buttons = 0;
+@@ -271,6 +314,20 @@ X_STATUS SwitchInputDriver::Setup() {
    return X_STATUS_SUCCESS;
  }
  
@@ -2808,15 +3213,16 @@ index ccf5e2a..9226a2e 100644
  void SwitchInputDriver::Poll(size_t index) {
    Slot& slot = *slots_[index];
    padUpdate(&slot.pad);
-@@ -283,6 +333,7 @@ void SwitchInputDriver::Poll(size_t index) {
+@@ -283,6 +340,8 @@ void SwitchInputDriver::Poll(size_t index) {
        slot.state = {};
        slot.state_changed = true;
        slot.key_buttons = 0;
 +      slot.menu_shortcuts = 0;
++      slot.chord_suppress = 0;
        slot.repeat_state = RepeatState::kIdle;
        slot.vibration_count = 0;
      } else {
-@@ -293,9 +344,24 @@ void SwitchInputDriver::Poll(size_t index) {
+@@ -293,9 +352,34 @@ void SwitchInputDriver::Poll(size_t index) {
      return;
    }
  
@@ -2825,9 +3231,19 @@ index ccf5e2a..9226a2e 100644
 +  uint64_t held = raw_buttons;
    DispatchMenuShortcuts(slot, held);
 +  if (REXCVAR_GET(switch_atajo_perfil_app)) {
++    const bool retener = REXCVAR_GET(switch_atajo_retener_botones);
 +    for (const auto& shortcut : kAppShortcuts) {
-+      if (slot.menu_shortcuts & shortcut.state_bit) held &= ~shortcut.chord;
++      if (slot.menu_shortcuts & shortcut.state_bit) {
++        held &= ~shortcut.chord;
++        if (retener) slot.chord_suppress |= shortcut.chord;
++      }
 +    }
++    // Latched: when one button of a fired chord is let go first, the ones still held do not reach the game as a
++    // new press (Plus would open the pause menu); each bit clears only when its button is released.
++    slot.chord_suppress = retener ? (slot.chord_suppress & raw_buttons) : 0;
++    held &= ~slot.chord_suppress;
++  } else {
++    slot.chord_suppress = 0;
 +  }
    X_INPUT_GAMEPAD gamepad{};
 +  // The game's own menu (rex/input/filtro_mando.h) takes this controller: the game sees it idle.
@@ -2842,7 +3258,7 @@ index ccf5e2a..9226a2e 100644
    uint16_t buttons = 0;
    const auto& frontales =
        REXCVAR_GET(input_xbox_layout) ? kFrontalesPorPosicion : kFrontalesPorLetra;
-@@ -321,15 +387,15 @@ void SwitchInputDriver::Poll(size_t index) {
+@@ -321,15 +405,15 @@ void SwitchInputDriver::Poll(size_t index) {
    gamepad.thumb_rx = ClampStickAxis(right.x);
    gamepad.thumb_ry = ClampStickAxis(right.y);
    /*
@@ -2864,7 +3280,7 @@ index ccf5e2a..9226a2e 100644
      gamepad.thumb_rx = static_cast<int16_t>(0);
      gamepad.thumb_ry = static_cast<int16_t>(0);
    }
-@@ -343,22 +409,27 @@ void SwitchInputDriver::Poll(size_t index) {
+@@ -343,22 +427,27 @@ void SwitchInputDriver::Poll(size_t index) {
  
  /* From the profiler (switch_perf.cpp): turns the GPU A/B test lap on and off. */
  extern "C" void RexSwitchPerfToggleAb(void);
@@ -2900,7 +3316,7 @@ index ccf5e2a..9226a2e 100644
   * It fires once per press, not while held: each shortcut stores its bit in
   * slot.menu_shortcuts with the state from the previous poll.
   */
-@@ -367,7 +438,24 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
+@@ -367,7 +456,24 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
      uint64_t boton;
      rex::ui::VirtualKey tecla;
    };
@@ -2926,7 +3342,7 @@ index ccf5e2a..9226a2e 100644
    static const Atajo kAtajos[] = {
        {HidNpadButton_Up, rex::ui::VirtualKey::kF3},
        {HidNpadButton_Right, rex::ui::VirtualKey::kF4},
-@@ -376,11 +464,27 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
+@@ -376,11 +482,27 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
    };
  
    const bool modificador = (held & kModificador) == kModificador;
@@ -2956,7 +3372,7 @@ index ccf5e2a..9226a2e 100644
        /*
         * Each shortcut creates or destroys an ImGui menu, and the UI thread
         * draws them continuously while any is open. From this game thread a
-@@ -402,12 +506,12 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
+@@ -402,12 +524,12 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
    }
  
    /*
@@ -2971,7 +3387,7 @@ index ccf5e2a..9226a2e 100644
    const bool ab_antes = (slot.menu_shortcuts & kBitAb) != 0;
    if (ab_ahora && !ab_antes) {
      RexSwitchPerfToggleAb();
-@@ -415,6 +519,16 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
+@@ -415,6 +537,16 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
    }
    slot.menu_shortcuts = ab_ahora ? (slot.menu_shortcuts | kBitAb)
                                   : (slot.menu_shortcuts & ~kBitAb);
@@ -2988,7 +3404,7 @@ index ccf5e2a..9226a2e 100644
  }
  
  SwitchInputDriver::Slot* SwitchInputDriver::FindSlot(DeviceId id) {
-@@ -569,11 +683,13 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
+@@ -569,11 +701,13 @@ X_RESULT SwitchInputDriver::SetDeviceVibration(DeviceId id, X_INPUT_VIBRATION* v
    }
  
    // XInput's left motor is the heavy low-frequency one, the right motor the
@@ -3005,7 +3421,7 @@ index ccf5e2a..9226a2e 100644
    value.freq_high = 320.0f;
    std::array<HidVibrationValue, 2> values = {value, value};
    if (R_FAILED(hidSendVibrationValues(slot->vibration_handles.data(), values.data(),
-@@ -672,3 +788,7 @@ X_RESULT SwitchInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
+@@ -672,3 +806,7 @@ X_RESULT SwitchInputDriver::GetDeviceKeystroke(DeviceId id, uint32_t flags,
  }
  
  }  // namespace rex::input::nx
@@ -3145,7 +3561,7 @@ index 5cfbb36..e824cb2 100644
    assert_true(!(index & ~0x0000FFFF));
    *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_io.cpp b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
-index d8fac47..6c0c766 100644
+index d8fac47..abfc0c9 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_io.cpp
 +++ b/src/kernel/xboxkrnl/xboxkrnl_io.cpp
 @@ -38,6 +38,7 @@
@@ -3279,12 +3695,13 @@ index d8fac47..6c0c766 100644
        }
        return;
      }
-@@ -568,6 +579,18 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
+@@ -568,6 +579,19 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
      io_status_block->information = (uint32_t)file_action;
    }
  
 +  // Build 0.1.51: one line per distinct path the game opens successfully (which data files it really uses).
-+  if (!XFAILED(result)) {
++  // Only with the periodic reports on: otherwise every open built a string and grew a set for the whole session.
++  if (!XFAILED(result) && REXCVAR_GET(nfsmw_dk_informe_periodico)) {
 +    static std::mutex abiertos_mutex;
 +    static std::unordered_set<std::string> abiertos;
 +    bool nuevo;
@@ -3298,7 +3715,7 @@ index d8fac47..6c0c766 100644
    *handle_out = handle;
    if (XFAILED(result)) {
      REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
-@@ -599,9 +622,11 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
+@@ -599,9 +623,11 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
    X_STATUS result = X_STATUS_SUCCESS;
    bool apc_queued = false;
  
@@ -3312,7 +3729,7 @@ index d8fac47..6c0c766 100644
    }
  
    bool signal_event = false;
-@@ -610,7 +635,6 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
+@@ -610,7 +636,6 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
      result = X_STATUS_INVALID_HANDLE;
    }
  
@@ -3320,7 +3737,7 @@ index d8fac47..6c0c766 100644
    if (!file) {
      result = X_STATUS_INVALID_HANDLE;
    }
-@@ -1055,7 +1079,7 @@ u32 NtFlushBuffersFile_entry(u32 file_handle, ppc_ptr_t<X_IO_STATUS_BLOCK> io_st
+@@ -1055,7 +1080,7 @@ u32 NtFlushBuffersFile_entry(u32 file_handle, ppc_ptr_t<X_IO_STATUS_BLOCK> io_st
      result = file->Flush();
      static std::atomic<uint32_t> avisos{0};
      if (avisos.fetch_add(1, std::memory_order_relaxed) < 16) {
@@ -3330,10 +3747,10 @@ index d8fac47..6c0c766 100644
      }
    }
 diff --git a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
-index 57fd161..cf90d01 100644
+index 57fd161..99259db 100644
 --- a/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
 +++ b/src/kernel/xboxkrnl/xboxkrnl_threading.cpp
-@@ -38,11 +38,196 @@
+@@ -38,11 +38,251 @@
  #include <rex/system/xtypes.h>
  #include <rex/thread/atomic.h>
  #include <rex/thread/mutex.h>
@@ -3347,6 +3764,11 @@ index 57fd161..cf90d01 100644
 +#include "../../core/threading_switch.h"
 +
 +extern "C" void RexSwitchPerfAdd(unsigned id, unsigned long long value);
++
++namespace rex::system {
++// xobject.cpp: called from ~XObject when set (the mixer-boost registry clears its entries with it).
++extern std::atomic<void (*)(XObject*)> g_xobject_destroyed_hook;
++}  // namespace rex::system
 +#endif
 +
 +REXCVAR_DEFINE_BOOL(audio_switch_prioridad_mezclador, true, "Audio",
@@ -3357,6 +3779,11 @@ index 57fd161..cf90d01 100644
 +                    "audio_parallel_client_callbacks each one also prefers its own core (1 and 2); "
 +                    "false = every game thread at 0x3B, as before");
 +REXCVAR_DECLARE(bool, audio_parallel_client_callbacks);  // audio_system.cpp
++REXCVAR_DEFINE_BOOL(kernel_switch_spinlock_cuenta_propia, true, "Kernel",
++                    "Switch: each guest spinlock wait starts with a fresh polling count, so its first attempts are "
++                    "plain yields instead of the 100 us sleep earned by whatever the thread polled just before (the "
++                    "sleep still comes after 16 quick attempts); false = the count is shared with every other "
++                    "polling call of the thread, as before");
  
  namespace rex::kernel::xboxkrnl {
  using namespace rex::system;
@@ -3439,6 +3866,9 @@ index 57fd161..cf90d01 100644
 +}
 +
 +bool IsAudioEvent(XObject* object) {
++  if (!object) {
++    return false;  // cleared entries are null
++  }
 +  const uint32_t n = std::min<uint32_t>(g_audio_event_count.load(std::memory_order_acquire),
 +                                        kMaxAudioEvents);
 +  for (uint32_t i = 0; i < n; ++i) {
@@ -3449,23 +3879,65 @@ index 57fd161..cf90d01 100644
 +  return false;
 +}
 +
++// Entries cleared because their object was destroyed (the slot can be taken again).
++std::atomic<uint32_t> g_audio_event_free{0};
++
++// XObject destructor hook (xobject.cpp): the registry keeps raw pointers without a reference, so an entry is
++// cleared when its object dies; otherwise a new object allocated at the same address would be taken for the
++// Audio Worker's event (and its waiter boosted as "the mixer"), and the dead entry would fill the registry.
++void NoteObjectDestroyed(XObject* object) {
++  // Lock-free check first: this runs for every object destroyed.
++  if (!IsAudioEvent(object)) {
++    return;
++  }
++  std::lock_guard<std::mutex> lock(g_audio_mixer_mutex);
++  const uint32_t n = std::min<uint32_t>(g_audio_event_count.load(std::memory_order_relaxed), kMaxAudioEvents);
++  for (uint32_t i = 0; i < n; ++i) {
++    if (g_audio_events[i].load(std::memory_order_relaxed) == object) {
++      g_audio_events[i].store(nullptr, std::memory_order_release);
++      g_audio_event_free.fetch_add(1, std::memory_order_relaxed);
++      REXKRNL_INFO("[B3 audio] registered Audio Worker event destroyed, entry {} cleared", i + 1);
++    }
++  }
++}
++
 +// Called from the set/pulse event shims.
 +void NoteEventSignal(XObject* object) {
-+  if (!object || g_audio_event_count.load(std::memory_order_relaxed) >= kMaxAudioEvents) {
++  if (!object || (g_audio_event_count.load(std::memory_order_relaxed) >= kMaxAudioEvents &&
++                  g_audio_event_free.load(std::memory_order_relaxed) == 0)) {
 +    return;
 +  }
 +  if (!CurrentThreadIsAudioWorker() || IsAudioEvent(object)) {
 +    return;
 +  }
 +  std::lock_guard<std::mutex> lock(g_audio_mixer_mutex);
-+  const uint32_t n = g_audio_event_count.load(std::memory_order_relaxed);
-+  if (n >= kMaxAudioEvents || IsAudioEvent(object)) {
++  if (IsAudioEvent(object)) {
 +    return;
 +  }
-+  g_audio_events[n].store(object, std::memory_order_relaxed);
-+  g_audio_event_count.store(n + 1, std::memory_order_release);
-+  REXKRNL_INFO("[B3 audio] event signalled by an Audio Worker registered ({}/{}): handle {:08X}",
-+               n + 1, kMaxAudioEvents, object->handle());
++  const uint32_t n = g_audio_event_count.load(std::memory_order_relaxed);
++  uint32_t slot = n;
++  if (n >= kMaxAudioEvents) {
++    // Full: reuse an entry whose object was destroyed.
++    slot = kMaxAudioEvents;
++    for (uint32_t i = 0; i < kMaxAudioEvents; ++i) {
++      if (!g_audio_events[i].load(std::memory_order_relaxed)) {
++        slot = i;
++        break;
++      }
++    }
++    if (slot == kMaxAudioEvents) {
++      return;
++    }
++    g_audio_event_free.fetch_sub(1, std::memory_order_relaxed);
++  }
++  // Set before the entry exists, so its destruction is always seen.
++  rex::system::g_xobject_destroyed_hook.store(&NoteObjectDestroyed, std::memory_order_release);
++  g_audio_events[slot].store(object, std::memory_order_release);
++  if (slot == n) {
++    g_audio_event_count.store(n + 1, std::memory_order_release);
++  }
++  REXKRNL_INFO("[B3 audio] event signalled by an Audio Worker registered (entry {}/{}): handle {:08X}",
++               slot + 1, kMaxAudioEvents, object->handle());
 +}
 +
 +// Called from the wait shims, before blocking, so the wake-up already runs at
@@ -3530,7 +4002,7 @@ index 57fd161..cf90d01 100644
  // r13 + 0x100: pointer to thread local state
  // Thread local state:
  //   0x058: kernel time
-@@ -469,6 +654,7 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
+@@ -469,6 +709,7 @@ uint32_t xeKeSetEvent(X_KEVENT* event_ptr, uint32_t increment, uint32_t wait) {
      return 0;
    }
  
@@ -3538,7 +4010,7 @@ index 57fd161..cf90d01 100644
    return ev->Set(increment, !!wait);
  }
  
-@@ -483,6 +669,7 @@ u32 KePulseEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
+@@ -483,6 +724,7 @@ u32 KePulseEvent_entry(ppc_ptr_t<X_KEVENT> event_ptr, u32 increment, u32 wait) {
      return 0;
    }
  
@@ -3546,7 +4018,7 @@ index 57fd161..cf90d01 100644
    return ev->Pulse(increment, !!wait);
  }
  
-@@ -532,6 +719,7 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
+@@ -532,6 +774,7 @@ uint32_t xeNtSetEvent(uint32_t handle, rex::be<uint32_t>* previous_state_ptr) {
  
    auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(handle);
    if (ev) {
@@ -3554,7 +4026,7 @@ index 57fd161..cf90d01 100644
      int32_t was_signalled = ev->Set(0, false);
      if (previous_state_ptr) {
        *previous_state_ptr = static_cast<uint32_t>(was_signalled);
-@@ -827,6 +1015,10 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_
+@@ -827,6 +1070,10 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason, uint32_
      return X_STATUS_ABANDONED_WAIT_0;
    }
  
@@ -3565,7 +4037,7 @@ index 57fd161..cf90d01 100644
    X_STATUS result = object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
  
    if (alertable && result == X_STATUS_USER_APC) {
-@@ -857,6 +1049,10 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
+@@ -857,6 +1104,10 @@ u32 NtWaitForSingleObjectEx_entry(u32 object_handle, u32 wait_mode, u32 alertabl
    auto object = REX_KERNEL_OBJECTS()->LookupObject<XObject>(object_handle);
    if (object) {
      uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
@@ -3576,7 +4048,7 @@ index 57fd161..cf90d01 100644
      result = object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
      if (alertable && result == X_STATUS_USER_APC) {
        XThread::GetCurrentThread()->DeliverAPCs();
-@@ -885,6 +1081,7 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
+@@ -885,6 +1136,7 @@ u32 KeWaitForMultipleObjects_entry(u32 count, mapped_u32 objects_ptr, u32 wait_t
    }
  
    uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
@@ -3584,7 +4056,7 @@ index 57fd161..cf90d01 100644
    X_STATUS result = XObject::WaitMultiple(
        uint32_t(objects.size()), reinterpret_cast<XObject**>(objects.data()), wait_type, wait_reason,
        processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
-@@ -909,6 +1106,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
+@@ -909,6 +1161,7 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, rex::be<uint32_t>* handles
      objects.push_back(std::move(object));
    }
  
@@ -3592,19 +4064,45 @@ index 57fd161..cf90d01 100644
    auto result = XObject::WaitMultiple(count, reinterpret_cast<XObject**>(objects.data()), wait_type,
                                        6, wait_mode, alertable, timeout_ptr);
    if (alertable && result == X_STATUS_USER_APC) {
+@@ -969,7 +1222,20 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock, bool change_i
+   uint32_t pcr_addr = static_cast<uint32_t>(ctx->r13.u64);
+   const uint32_t self = rex::byte_swap(pcr_addr);
+   assert_true(lock->prcb_of_owner.value != self);  // self-deadlock detection
++#if REX_PLATFORM_SWITCH
++  // kernel_switch_spinlock_cuenta_propia: the polling count of MaybeYield is shared by every call site of the
++  // thread, so a thread that had just polled something else slept 100 us on its first attempt at a spinlock held
++  // for a few microseconds. Starting each spinlock wait at zero keeps 16 plain yields first; the 100 us sleep is
++  // still there after them, so a holder on the same core (a boosted 0x2D waiter is cooperative) still gets to run.
++  bool reset_backoff = REXCVAR_GET(kernel_switch_spinlock_cuenta_propia);
++#endif
+   while (!rex::thread::atomic_cas(0u, self, &lock->prcb_of_owner.value)) {
++#if REX_PLATFORM_SWITCH
++    if (reset_backoff) {
++      RexSwitchResetYieldBackoff();
++      reset_backoff = false;
++    }
++#endif
+     rex::thread::MaybeYield();
+   }
+   return old_irql;
 diff --git a/src/system/xobject.cpp b/src/system/xobject.cpp
-index d358f39..f335596 100644
+index d358f39..4edc3ee 100644
 --- a/src/system/xobject.cpp
 +++ b/src/system/xobject.cpp
-@@ -9,6 +9,7 @@
+@@ -9,9 +9,12 @@
   * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
   */
  
++#include <atomic>
 +#include <mutex>
  #include <vector>
  
  #include <rex/chrono/clock.h>
-@@ -29,6 +30,36 @@
++#include <rex/platform.h>
+ #include <rex/stream.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/util/string_utils.h>  // For TranslateAnsiStringAddress
+@@ -29,6 +32,42 @@
  
  namespace rex::system {
  
@@ -3637,11 +4135,30 @@ index d358f39..f335596 100644
 +  t_mutex_released_during_waits = mutex;
 +}
 +
++#if REX_PLATFORM_SWITCH
++// Set by the guest audio mixer boost (xboxkrnl_threading.cpp), which keeps raw XObject pointers: it clears its
++// entry when the object dies, so a new object at the same address is not mistaken for it.
++std::atomic<void (*)(XObject*)> g_xobject_destroyed_hook{nullptr};
++#endif
++
 +
  XObject::XObject(Type type) : kernel_state_(nullptr), pointer_ref_count_(1), type_(type) {
    handles_.reserve(10);
  }
-@@ -213,7 +244,11 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
+@@ -52,6 +91,12 @@ XObject::~XObject() {
+   // assert_true(handles_.empty());
+   // assert_zero(pointer_ref_count_);
+ 
++#if REX_PLATFORM_SWITCH
++  if (auto* hook = g_xobject_destroyed_hook.load(std::memory_order_acquire)) {
++    hook(this);
++  }
++#endif
++
+   if (allocated_guest_object_) {
+     uint32_t ptr = guest_object_ptr_ - sizeof(X_OBJECT_HEADER);
+     auto header = memory()->TranslateVirtual<X_OBJECT_HEADER*>(ptr);
+@@ -213,7 +258,11 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                  : std::chrono::milliseconds::max();
  
    XThread::CheckTitleTermination();
@@ -3654,7 +4171,7 @@ index d358f39..f335596 100644
    XThread::CheckTitleTermination();
    switch (result) {
      case rex::thread::WaitResult::kSuccess:
-@@ -239,9 +274,13 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
+@@ -239,9 +288,13 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
                                        TimeoutTicksToMs(*opt_timeout)))
                                  : std::chrono::milliseconds::max();
  
@@ -3671,7 +4188,7 @@ index d358f39..f335596 100644
    switch (result) {
      case rex::thread::WaitResult::kSuccess:
        wait_object->WaitCallback();
-@@ -274,8 +313,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+@@ -274,8 +327,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
  
    XThread::CheckTitleTermination();
    if (wait_type) {
@@ -3685,7 +4202,7 @@ index d358f39..f335596 100644
      XThread::CheckTitleTermination();
      switch (result.first) {
        case rex::thread::WaitResult::kSuccess:
-@@ -295,8 +337,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
+@@ -295,8 +351,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
          return X_STATUS_UNSUCCESSFUL;
      }
    } else {
@@ -3700,10 +4217,52 @@ index d358f39..f335596 100644
      switch (result) {
        case rex::thread::WaitResult::kSuccess:
 diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
-index af02bc0..7591647 100644
+index af02bc0..9423815 100644
 --- a/src/system/xthread.cpp
 +++ b/src/system/xthread.cpp
-@@ -894,9 +894,18 @@ void XThread::SetPriority(int32_t increment) {
+@@ -49,6 +49,15 @@ REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
+ REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
+                     "Ignores game-specified thread affinities");
+ 
++// A/B experiment (review 0.1.60, finding 8): every hot thread prefers the process default core. Preferred core only,
++// the mask is kept (the same call the mixer boost uses for cores 1 and 2), so the kernel can still move the thread.
++REXCVAR_DEFINE_INT32(switch_nucleo_hilo_principal, -1, "Kernel",
++                     "Switch: preferred core (0-2) of the game's main thread (Main XThread); only the preference, "
++                     "the core mask is kept. -1 = unchanged (process default core); read when the thread starts");
++REXCVAR_DEFINE_INT32(switch_nucleo_hilo_gpu, -1, "Kernel",
++                     "Switch: preferred core (0-2) of the GPU command thread (GPU Commands); only the preference, "
++                     "the core mask is kept. -1 = unchanged (process default core); read when the thread starts");
++
+ namespace rex::system {
+ 
+ const uint32_t XAPC::kSize;
+@@ -470,6 +479,25 @@ X_STATUS XThread::Create() {
+     rex::initialize_seh_thread();
+ #if REX_PLATFORM_SWITCH
+     RexSwitchSetCurrentThreadPriority(SwitchPriorityFor(guest_thread_, thread_name_));
++    {
++      // switch_nucleo_hilo_principal / switch_nucleo_hilo_gpu: -1 (default) leaves the preferred core alone.
++      int nucleo = -1;
++      const char* que = nullptr;
++      if (main_thread_) {
++        nucleo = REXCVAR_GET(switch_nucleo_hilo_principal);
++        que = "main thread";
++      } else if (!guest_thread_ && std::string_view(thread_name_).starts_with("GPU Commands")) {
++        nucleo = REXCVAR_GET(switch_nucleo_hilo_gpu);
++        que = "GPU command thread";
++      }
++      if (que && nucleo >= 0) {
++        if (nucleo <= 2 && RexSwitchSetCurrentThreadCore(nucleo)) {
++          REXSYS_INFO("[threads] {} prefers core {} (mask unchanged)", que, nucleo);
++        } else {
++          REXSYS_WARN("[threads] {}: preferred core {} refused, left at the process default", que, nucleo);
++        }
++      }
++    }
+ #endif
+     runtime::ThreadState::Bind(thread_state_.get());
+ 
+@@ -894,9 +922,18 @@ void XThread::SetPriority(int32_t increment) {
    } else {
      target_priority = rex::thread::ThreadPriority::kNormal;
    }
@@ -3947,7 +4506,7 @@ index dba3808..1518364 100644
  
  void Presentacion::Destruir() {
 diff --git a/src/ui/deko3d/presentador.cpp b/src/ui/deko3d/presentador.cpp
-index cdf084b..bb108ec 100644
+index cdf084b..5219bb1 100644
 --- a/src/ui/deko3d/presentador.cpp
 +++ b/src/ui/deko3d/presentador.cpp
 @@ -2,17 +2,41 @@
@@ -4544,7 +5103,7 @@ index cdf084b..bb108ec 100644
      DkImageView vista;
      dkImageViewDefaults(&vista, &cadena_.Imagen(imagen));
      dkCmdBufBindRenderTarget(c, &vista, nullptr);
-@@ -350,20 +853,423 @@ class PresentadorDeko3d final : public Presenter {
+@@ -350,20 +853,445 @@ class PresentadorDeko3d final : public Presenter {
            const DkResHandle h = dkMakeTextureHandle(indice, 0);
            dkCmdBufBindTextures(c, DkStage_Fragment, 0, &h, 1);
            dkCmdBufDraw(c, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
@@ -4666,7 +5225,6 @@ index cdf084b..bb108ec 100644
 +    Superposicion& s = LaSuperposicion();
 +    std::vector<std::string> lineas;
 +    std::vector<rex::ui::IconoEnLinea> iconos;
-+    std::string letreiro;
 +    uint64_t version;
 +    uint32_t filas_aviso = 0;
 +    bool copiar_lineas;
@@ -4680,12 +5238,24 @@ index cdf084b..bb108ec 100644
 +        iconos = aviso ? s.iconos_aviso : s.iconos;
 +        if (aviso) filas_aviso = std::min(kMenuFilas, uint32_t(lineas.size()));
 +      }
-+      if (!aviso) letreiro = s.letreiro;
++      // The marquee text is copied only when it can have changed (FijarLetreiro bumps the version), not on every
++      // presented frame.
++      if (!menu_letreiro_copiado_ || s.version != menu_letreiro_version_ || aviso != menu_letreiro_aviso_) {
++        if (aviso) {
++          menu_letreiro_fuente_.clear();
++        } else {
++          menu_letreiro_fuente_ = s.letreiro;
++        }
++        menu_letreiro_version_ = s.version;
++        menu_letreiro_aviso_ = aviso;
++        menu_letreiro_copiado_ = true;
++      }
 +      version = s.version;
 +    }
++    const std::string& letreiro = menu_letreiro_fuente_;
 +    // The marquee: shorter than the box it stays still; longer, it scrolls one character every kLetreiroCuadros
 +    // presented frames (the text, three spaces, the text again).
-+    std::string visible = letreiro;
++    std::string& visible = menu_letreiro_tmp_;
 +    if (letreiro.size() > kMenuColumnas) {
 +      if (letreiro != menu_letreiro_) {
 +        menu_letreiro_ = letreiro;
@@ -4696,10 +5266,17 @@ index cdf084b..bb108ec 100644
 +        menu_letreiro_cuadros_ = 0;
 +        ++menu_letreiro_pos_;
 +      }
-+      const size_t periodo = letreiro.size() + 3;
-+      const std::string doble = letreiro + "   " + letreiro;
-+      visible = doble.substr(menu_letreiro_pos_ % periodo, kMenuColumnas);
++      // Same characters as (text + "   " + text).substr(pos % period, kMenuColumnas), without building it.
++      const size_t n = letreiro.size();
++      const size_t periodo = n + 3;
++      const size_t inicio = menu_letreiro_pos_ % periodo;
++      visible.clear();
++      for (size_t k = 0; k < kMenuColumnas; ++k) {
++        const size_t j = inicio + k;
++        visible.push_back(j < n ? letreiro[j] : (j < n + 3 ? ' ' : letreiro[j - n - 3]));
++      }
 +    } else {
++      visible = letreiro;
 +      menu_letreiro_.clear();
 +    }
 +    if (!copiar_lineas && visible == menu_letreiro_visible_) return true;
@@ -4955,6 +5532,10 @@ index cdf084b..bb108ec 100644
 +  std::vector<uint8_t> menu_cpu_, menu_tira_;  // rasterized here (CPU-cached), then copied to the upload ring
 +  uint32_t menu_ancho_usado_ = kMenuAnchoHd;  // texels: the notification's box is cropped to its text
 +  std::string menu_letreiro_, menu_letreiro_visible_;
++  // The marquee text as last copied from the overlay (for its version and notice state), and the scratch line.
++  std::string menu_letreiro_fuente_, menu_letreiro_tmp_;
++  uint64_t menu_letreiro_version_ = 0;
++  bool menu_letreiro_aviso_ = false, menu_letreiro_copiado_ = false;
 +  uint32_t menu_letreiro_pos_ = 0, menu_letreiro_cuadros_ = 0;
 +  bool menu_con_letreiro_ = false;
 +
@@ -4968,7 +5549,7 @@ index cdf084b..bb108ec 100644
    struct ImagenSalida {
      DkMemBlock memoria = nullptr;
      DkImage imagen{};
-@@ -376,6 +1282,9 @@ class PresentadorDeko3d final : public Presenter {
+@@ -376,6 +1304,9 @@ class PresentadorDeko3d final : public Presenter {
    Nucleo nucleo_;  // the painting thread's
    Presentacion cadena_;
    NWindow* ventana_ = nullptr;
@@ -4978,7 +5559,7 @@ index cdf084b..bb108ec 100644
    DkShader vs_{}, fs_{};
    uint64_t trabajo_ = 0;
    std::array<ImagenSalida, kGuestOutputMailboxSize> salidas_{};
-@@ -614,7 +1523,7 @@ std::unique_ptr<ProveedorDeko3d> ProveedorDeko3d::Crear() {
+@@ -614,7 +1545,7 @@ std::unique_ptr<ProveedorDeko3d> ProveedorDeko3d::Crear() {
    // A deko3d failure ends the process: the core flushes before every creation and before Fatal.
    FijarRegistro([](const char* linea) { REXLOG_INFO("{}", linea); }, [] { rex::FlushLogging(); });
    std::unique_ptr<ProveedorDeko3d> p(new ProveedorDeko3d());
@@ -4987,7 +5568,7 @@ index cdf084b..bb108ec 100644
    p->compilador_ = std::make_unique<Compilador>();
    return p;
  }
-@@ -644,3 +1553,112 @@ std::unique_ptr<rex::ui::ImmediateDrawer> ProveedorDeko3d::CreateImmediateDrawer
+@@ -644,3 +1575,112 @@ std::unique_ptr<rex::ui::ImmediateDrawer> ProveedorDeko3d::CreateImmediateDrawer
  }
  
  }  // namespace rex::deko3d
@@ -5255,10 +5836,20 @@ index b71ce09..0715c52 100644
 +extern "C" int RexSwitchApmAtivo(void) { return 0; }
  #endif  // REX_PLATFORM_SWITCH
 diff --git a/src/ui/switch_perf.cpp b/src/ui/switch_perf.cpp
-index 6b3d30a..cd1f90f 100644
+index 6b3d30a..a557322 100644
 --- a/src/ui/switch_perf.cpp
 +++ b/src/ui/switch_perf.cpp
-@@ -103,7 +103,9 @@ constexpr u64 kReportSeconds = 10;
+@@ -81,6 +81,9 @@ Result __real_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32
+ void __real_svcSleepThread(s64 nano);
+ }
+ 
++// logging.cpp: the log_to_file cvar (this file is built without the cvar headers).
++extern "C" bool RexLogToFileEnabled(void);
++
+ namespace {
+ 
+ constexpr size_t kMaxThreads = 160;
+@@ -103,12 +106,21 @@ constexpr u64 kReportSeconds = 10;
  constexpr u64 kStartDelayNs = 8000000000ULL;
  constexpr size_t kMaxSamples = 1 << 15;
  constexpr size_t kFrames = 10;
@@ -5267,9 +5858,21 @@ index 6b3d30a..cd1f90f 100644
 +// 38/39 callback max us of clients 0/1, 40 callbacks longer than one 5.333 ms audio period.
 +constexpr unsigned kCounterCount = 41;
  // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
++// log_to_file off: the report is not written (the thread still feeds the FPS overlay).
++FILE* OpenReport(const char* mode);
++
  std::string ReportPath() {
    return std::string(RexSwitchLogDir()) + "rex_perfil.log";
-@@ -232,6 +234,24 @@ extern "C" void RexSwitchPerfToggleAb(void) {
+ }
+ 
++FILE* OpenReport(const char* mode) {
++  return RexLogToFileEnabled() ? std::fopen(ReportPath().c_str(), mode) : nullptr;
++}
++
+ struct Slot {
+   std::atomic<u32> handle{0};
+   char name[32]{};
+@@ -232,6 +244,24 @@ extern "C" void RexSwitchPerfToggleAb(void) {
    }
  }
  
@@ -5284,7 +5887,7 @@ index 6b3d30a..cd1f90f 100644
 +extern "C" bool RexSwitchPerfToggleStacks(void) {
 +  const bool nuevo = !g_muestrear_pilas.load(std::memory_order_relaxed);
 +  g_muestrear_pilas.store(nuevo, std::memory_order_relaxed);
-+  if (FILE* f = std::fopen(ReportPath().c_str(), "a")) {
++  if (FILE* f = OpenReport("a")) {
 +    std::fprintf(f, "\nMuestreo de pilas: %s (atajo ZL+ZR+R)\n", nuevo ? "activo (1 ms)" : "desactivado");
 +    std::fclose(f);
 +  }
@@ -5294,7 +5897,16 @@ index 6b3d30a..cd1f90f 100644
  /*
   * Horizon limits how much memory a process may map (LimitableResource_Memory). Our
   * guest memory model maps each chunk several times (the shadow and once per 360
-@@ -414,13 +434,31 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
+@@ -372,7 +402,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
+   std::sort(order.begin(), order.end(),
+             [](size_t a, size_t b) { return g_slots[a].cpu > g_slots[b].cpu; });
+ 
+-  FILE* f = std::fopen(ReportPath().c_str(), "a");
++  FILE* f = OpenReport("a");
+   if (!f) {
+     g_sample_count = 0;
+     return;
+@@ -414,13 +444,31 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
    // in handheld mode.
    const u64 pico_audio = g_counters[23].exchange(0, std::memory_order_relaxed);
    std::fprintf(f,
@@ -5331,7 +5943,7 @@ index 6b3d30a..cd1f90f 100644
    // Reverse-NX state as is, without interpretation. A whole test session was wasted because its
    // overlay said "Docked" while "Controlled by system" was Yes, and in that case its mode does not
    // rule: it only mirrors the console's. This shows at a glance which of the two is happening.
-@@ -808,6 +846,9 @@ void ProfilerMain(void*) {
+@@ -808,12 +856,15 @@ void ProfilerMain(void*) {
      sample_stacks = true;
      std::fclose(flag);
    }
@@ -5341,7 +5953,14 @@ index 6b3d30a..cd1f90f 100644
  
    u64 counters_last[kCounterCount]{};
    for (unsigned i = 0; i < kCounterCount; ++i) {
-@@ -831,6 +872,7 @@ void ProfilerMain(void*) {
+     counters_last[i] = g_counters[i].load(std::memory_order_relaxed);
+   }
+-  if (FILE* f = std::fopen(ReportPath().c_str(), "w")) {
++  if (FILE* f = OpenReport("w")) {
+     std::fprintf(f, "imagen 0x%016" PRIx64 ", codigo hasta 0x%016" PRIx64 "\n\n", g_base,
+                  g_text_hi);
+     std::fprintf(f, "Muestreo de pilas: %s\n", sample_stacks ? "activo (1 ms)" : "desactivado");
+@@ -831,6 +882,7 @@ void ProfilerMain(void*) {
    size_t rr = 0;
    size_t mode_index = 0;
    while (true) {
@@ -5349,7 +5968,7 @@ index 6b3d30a..cd1f90f 100644
      __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
  
      for (size_t tries = 0; sample_stacks && tries < kMaxThreads; ++tries) {
-@@ -990,11 +1032,55 @@ void __wrap_armDCacheClean(void* addr, size_t size) {
+@@ -990,11 +1042,55 @@ void __wrap_armDCacheClean(void* addr, size_t size) {
   */
  std::atomic<unsigned> g_intervalo_swap{0};
  
@@ -5408,7 +6027,7 @@ index 6b3d30a..cd1f90f 100644
    }
    const Result rc = __real_nwindowQueueBuffer(nw, slot, fence);
    Anotar(kQueueBuffer, desde);
-@@ -1038,6 +1124,17 @@ void RexSwitchPerfIntervaloSwap(unsigned vblanks) {
+@@ -1038,6 +1134,17 @@ void RexSwitchPerfIntervaloSwap(unsigned vblanks) {
    g_intervalo_swap.store(vblanks, std::memory_order_relaxed);
  }
  
@@ -5540,7 +6159,7 @@ index 7755dc3..730888b 100644
      {
        const bool sobremesa = rex::ui::switch_saltynx::ModoBase(
 diff --git a/src/x360/deko/destinos.cpp b/src/x360/deko/destinos.cpp
-index dcd46c7..0ed4ba6 100644
+index dcd46c7..60bbcc8 100644
 --- a/src/x360/deko/destinos.cpp
 +++ b/src/x360/deko/destinos.cpp
 @@ -8,12 +8,18 @@
@@ -5594,7 +6213,7 @@ index dcd46c7..0ed4ba6 100644
  REXCVAR_DEFINE_BOOL(nfsmw_nativo_frontal_perezoso, true, "NFSMW",
                      "Renderizador nativo (25/09, build 184): el Swap pinta el frontal desde su destino de render en vez "
                      "de copiarlo antes a la textura. Misma imagen; con FXAA se copia como siempre. false = copiar "
-@@ -93,14 +122,18 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_subida_mb, 32, "NFSMW",
+@@ -93,14 +122,23 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_subida_mb, 32, "NFSMW",
                       "texturas). Si un fotograma no cabe se envia y sigue en la siguiente ranura")
      .range(8, 128)
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -5603,6 +6222,11 @@ index dcd46c7..0ed4ba6 100644
 +                    "deko3d: when only g_IndiceBase (words 122/263) of the shared constant block changed and the block is "
 +                    "already bound, push just those words in order with the draws instead of copying the whole block. "
 +                    "false = copy the whole block as before");
++REXCVAR_DEFINE_BOOL(nfsmw_dk_resuelta_antiga_recusar, false, "NFSMW",
++                    "deko3d (0.1.61, dialogue bug test): a resolved texture kept for another size at the same address is "
++                    "not sampled when it was written more than 2 frames ago, or before the address's current resolve; "
++                    "the current resolve or guest memory is used instead. false = sample it as before (pause and "
++                    "result backgrounds may legitimately read an old resolve)");
 +REXCVAR_DEFINE_INT32(nfsmw_dk_perfil_gpu_s, 0, "NFSMW",
                       "deko3d: cada cuantos segundos se mide un fotograma dibujo a dibujo en la GPU (una marca de tiempo "
                       "antes y despues de cada dibujo; ese fotograma va algo mas lento) para el informe de pases y "
@@ -5616,7 +6240,7 @@ index dcd46c7..0ed4ba6 100644
                      "deko3d: en el fotograma medido, los dibujos a pantalla completa con texturas que se pueden repetir "
                      "se dibujan ademas con el sampler 0, con texturas vacias de 1x1 y escribiendo solo el destino 0, "
                      "antes de su copia real: que parte de su coste es el muestreo, la lectura o la salida");
-@@ -109,13 +142,13 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_geometria_mb, 64, "NFSMW",
+@@ -109,13 +147,13 @@ REXCVAR_DEFINE_INT32(nfsmw_dk_geometria_mb, 64, "NFSMW",
                       "un rango visto dos veces con el mismo contenido (XXH3) se queda y los dibujos siguientes lo usan "
                       "sin copiarlo ni convertirlo. 0 = apagado, todo al anillo como antes")
      .range(0, 256)
@@ -5632,7 +6256,7 @@ index dcd46c7..0ed4ba6 100644
  
  extern "C" void RexSwitchPerfCount(unsigned id);
  
-@@ -178,6 +211,14 @@ DkImageView VistaCompleta(const DkImage& imagen) {
+@@ -178,6 +216,14 @@ DkImageView VistaCompleta(const DkImage& imagen) {
  
  std::filesystem::path RutaCache() { return rex::filesystem::GetExecutableFolder() / "cache" / "nfsmw_dksh.bin"; }
  
@@ -5647,7 +6271,7 @@ index dcd46c7..0ed4ba6 100644
  // ---- The output pass's shaders (GLSL for uam). The same work as the Vulkan path's nfsmw_salida_rampa_gamma.frag
  // (see it for the reasons): a full-screen triangle, the source's texel, and the game's ramp.
  constexpr const char* kVsSalida = R"(#version 460
-@@ -206,7 +247,7 @@ const vec3 kPesosLuma = vec3(0.299, 0.587, 0.114);
+@@ -206,7 +252,7 @@ const vec3 kPesosLuma = vec3(0.299, 0.587, 0.114);
  float Luma(vec2 uv) { return dot(textureLod(origen, uv, 0.0).rgb, kPesosLuma); }
  
  vec3 Fxaa(vec2 uv) {
@@ -5656,7 +6280,7 @@ index dcd46c7..0ed4ba6 100644
    vec3 rgb_centro = textureLod(origen, uv, 0.0).rgb;
    float luma_centro = dot(rgb_centro, kPesosLuma);
    float luma_no = Luma(uv + vec2(-paso.x, -paso.y));
-@@ -230,6 +271,115 @@ vec3 Fxaa(vec2 uv) {
+@@ -230,6 +276,115 @@ vec3 Fxaa(vec2 uv) {
    return (luma_b < luma_min || luma_b > luma_max) ? rgb_a : rgb_b;
  }
  
@@ -5772,7 +6396,7 @@ index dcd46c7..0ed4ba6 100644
  void main() {
    ivec2 pixel = ivec2(gl_FragCoord.xy) - rampa.desplazamiento.xy;
    vec3 texel;
-@@ -237,6 +387,10 @@ void main() {
+@@ -237,6 +392,10 @@ void main() {
    texel = Fxaa((vec2(uvec2(pixel)) + 0.5) * rampa.inverso.xy);
  #elif EXACTA
    texel = texelFetch(origen, pixel, 0).rgb;
@@ -5783,7 +6407,7 @@ index dcd46c7..0ed4ba6 100644
  #else
    texel = textureLod(origen, (vec2(uvec2(pixel)) + 0.5) * rampa.inverso.xy, 0.0).rgb;
  #endif
-@@ -277,6 +431,22 @@ void main() {
+@@ -277,6 +436,22 @@ void main() {
    color = texelFetch(origen, ivec2(gl_FragCoord.xy) + copia.desplazamiento.xy, 0);
  }
  )";
@@ -5806,7 +6430,7 @@ index dcd46c7..0ed4ba6 100644
  constexpr const char* kFsCopiaProfundidad = R"(#version 460
  layout(binding = 0) uniform sampler2D origen;
  layout(std140, binding = 0) uniform Copia {
-@@ -287,9 +457,97 @@ void main() {
+@@ -287,9 +462,97 @@ void main() {
  }
  )";
  
@@ -5904,7 +6528,7 @@ index dcd46c7..0ed4ba6 100644
  }  // namespace
  
  // ---- Construction
-@@ -313,6 +571,9 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -313,6 +576,9 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
    lectura_bloque_ = nucleo_.CrearBloqueLectura(kRanuras * kBytesLecturaRanura, "lecturas de vuelta (por ranura)");
    lectura_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(lectura_bloque_));
    lectura_gpu_ = dkMemBlockGetGpuAddr(lectura_bloque_);
@@ -5914,7 +6538,7 @@ index dcd46c7..0ed4ba6 100644
    if (REXCVAR_GET(nfsmw_dk_perfil_gpu_s) > 0) {
      perfil_bloque_ = nucleo_.CrearBloqueLectura(kMarcasPerfil * 32, "perfil de la GPU por dibujo");
      perfil_cpu_ = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(perfil_bloque_));
-@@ -327,20 +588,46 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -327,20 +593,46 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
    }
    RecalcularRampa();
  
@@ -5943,7 +6567,8 @@ index dcd46c7..0ed4ba6 100644
 +    if (un_shader && (leida.size() != 1 || ruta.filename().string() != NombreShaderCache(leida.entradas().begin()->first))) {
 +      REXLOG_WARN("[deko3d] cache de DKSH {} no corresponde a su nombre", ruta.string());
 +      return 0;
-+    }
+     }
+-    REXLOG_WARN("[deko3d] cache de DKSH {} no se usa: {}", ruta.string(), motivo);
 +    size_t nuevas = 0;
 +    for (const auto& [clave, dksh] : leida.entradas()) {
 +      if (!cache_.Buscar(clave)) {
@@ -5962,8 +6587,7 @@ index dcd46c7..0ed4ba6 100644
 +    for (std::filesystem::directory_iterator it(carpeta_dksh, estado_cache), end;
 +         !estado_cache && it != end; it.increment(estado_cache)) {
 +      if (it->path().extension() == ".nfdk" && it->is_regular_file(estado_cache)) nuevas += leer_cache(it->path(), true);
-     }
--    REXLOG_WARN("[deko3d] cache de DKSH {} no se usa: {}", ruta.string(), motivo);
++    }
 +    if (estado_cache) REXLOG_WARN("[deko3d] erro ao enumerar {}: {}", carpeta_dksh.string(), estado_cache.message());
 +    REXLOG_INFO("[deko3d] cache DKSH por shader: {} arquivos validos em {}", nuevas, carpeta_dksh.string());
 +  } else {
@@ -5972,7 +6596,7 @@ index dcd46c7..0ed4ba6 100644
    }
    if (!cache_.size()) {
      REXLOG_WARN("[deko3d] sin cache de DKSH: cada shader se compila en la consola la primera vez que se usa");
-@@ -355,6 +642,21 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
+@@ -355,6 +647,21 @@ RenderDk::RenderDk(deko::ProveedorDeko3d& proveedor, rex::memory::Memory* memori
      REXLOG_ERROR("[deko3d] no se pudo compilar el pixel shader vacio: {}", vacio.log);
    }
    CrearShadersSalida();
@@ -5994,7 +6618,7 @@ index dcd46c7..0ed4ba6 100644
    AsegurarTrabajo();
    CrearVacias();
    REXLOG_INFO("[deko3d] destinos: etapa P2 (videos, menus y titulo): {} MB de subida por ranura, compresion de color "
-@@ -529,9 +831,31 @@ void RenderDk::AntesDe3D() {
+@@ -529,9 +836,31 @@ void RenderDk::AntesDe3D() {
  }
  
  bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32_t ancho, uint32_t alto,
@@ -6028,7 +6652,7 @@ index dcd46c7..0ed4ba6 100644
      return false;
    }
    AsegurarTrabajo();
-@@ -540,9 +864,22 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -540,9 +869,22 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    if (!ubo) {
      return false;
    }
@@ -6053,7 +6677,7 @@ index dcd46c7..0ed4ba6 100644
    DkCmdBuf cmd = nucleo_.comandos();
    MarcarGpu(kGpuCopias);
    if (transferencia_sin_barrera_) {
-@@ -567,8 +904,9 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -567,8 +909,9 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    } else {
      dkCmdBufBindRenderTarget(cmd, &vista, nullptr);
    }
@@ -6065,7 +6689,7 @@ index dcd46c7..0ed4ba6 100644
    dkCmdBufSetViewports(cmd, 0, &vp, 1);
    static const DkViewportSwizzle kIdentidad = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
                                                  DkSwizzle_PositiveW};
-@@ -589,17 +927,31 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
+@@ -589,17 +932,31 @@ bool RenderDk::Copiar3D(const ImagenDk& origen, uint32_t x0, uint32_t y0, uint32
    ds.depthTestEnable = z;
    ds.depthWriteEnable = z;
    ds.depthCompareOp = DkCompareOp_Always;
@@ -6099,7 +6723,7 @@ index dcd46c7..0ed4ba6 100644
    dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
    ++copias_3d_;
    copia3d_pendiente_ = true;
-@@ -618,14 +970,83 @@ deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
+@@ -618,14 +975,83 @@ deko::Subida RenderDk::Reservar(uint32_t bytes, uint32_t alineacion) {
    return s;
  }
  
@@ -6184,7 +6808,7 @@ index dcd46c7..0ed4ba6 100644
    DkImageLayoutMaker m;
    dkImageLayoutMakerDefaults(&m, nucleo_.dispositivo());
    m.type = tipo;
-@@ -647,12 +1068,16 @@ bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat for
+@@ -647,12 +1073,16 @@ bool RenderDk::CrearImagen(ImagenDk& imagen, DkImageType tipo, DkImageFormat for
    dkImageInitialize(&imagen.imagen, &disposicion, imagen.memoria.bloque, imagen.memoria.offset);
    imagen.tipo = tipo;
    imagen.formato = formato;
@@ -6203,7 +6827,7 @@ index dcd46c7..0ed4ba6 100644
    imagen.serie = ++serie_imagenes_;
    return true;
  }
-@@ -675,7 +1100,7 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
+@@ -675,7 +1105,7 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
    AntesDe3D();
    DkCmdBuf cmd = nucleo_.comandos();
    const DkImageView vista = VistaCompleta(imagen.imagen);
@@ -6212,7 +6836,7 @@ index dcd46c7..0ed4ba6 100644
    imagen.alto_borrado = imagen.alto;
    imagen.banda_sucia = false;
    imagen.borrado_z = 1.0f;
-@@ -693,6 +1118,69 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
+@@ -693,6 +1123,69 @@ void RenderDk::PrepararDestino(ImagenDk& imagen) {
    OlvidarEstado();
  }
  
@@ -6282,7 +6906,7 @@ index dcd46c7..0ed4ba6 100644
  ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch) {
    if (!pitch) {
      Rechazar(7, "destino de render con pitch 0");
-@@ -705,15 +1193,22 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
+@@ -705,15 +1198,22 @@ ImagenDk* RenderDk::DestinoColor(uint32_t base, uint32_t formato, uint32_t pitch
    // The height from the pitch, as the Vulkan path (nfsmw_nativo_destinos.cpp, ObtenerDestino explains why).
    const uint32_t alto = std::min(kAltoMaximoDestino, std::max<uint32_t>(720, (pitch + 15) & ~15u));
    ImagenDk imagen;
@@ -6308,7 +6932,7 @@ index dcd46c7..0ed4ba6 100644
    ImagenDk& nueva = destinos_.emplace(clave, imagen).first->second;
    PrepararDestino(nueva);
    return &nueva;
-@@ -734,61 +1229,145 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
+@@ -734,61 +1234,159 @@ ImagenDk* RenderDk::DestinoProfundidad(uint32_t base, uint32_t formato, uint32_t
    // compression: untested on deko3d, and copies broke it on nouveau (HowToDeko3d.md, section 5.10).
    static const uint32_t flags_z =
        DkImageFlags_UsageRender | (REXCVAR_GET(nfsmw_dk_compresion_profundidad) ? DkImageFlags_HwCompression : 0u);
@@ -6370,7 +6994,9 @@ index dcd46c7..0ed4ba6 100644
 +    // one of the new size, if it was kept, comes back without being created again.
      if (frontal_.pendiente && frontal_.resuelta == &r) {
 -      frontal_.pendiente = false;  // its texture goes: nothing to copy into
-+      frontal_.pendiente = false;  // it moves: nothing to copy into
++      // It moves to resueltas_otras_: the pending front copy is made now, while frontal_.resuelta still points at it
++      // (it was dropped, and the kept image held an older frame).
++      MaterializarFrontal();
 +    }
 +    const auto vieja = std::make_tuple(base, r.imagen.ancho, r.imagen.alto, uint32_t(r.imagen.formato));
 +    if (auto o = resueltas_otras_.find(vieja); o != resueltas_otras_.end()) {
@@ -6444,6 +7070,18 @@ index dcd46c7..0ed4ba6 100644
  }
  
 -const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
++std::string RenderDk::DescribirResuelta(uint32_t base) const {
++  uint32_t otras = 0;
++  for (const auto& [clave, o] : resueltas_otras_) otras += std::get<0>(clave) == base;
++  const auto it = resueltas_.find(base);
++  if (it == resueltas_.end()) return fmt::format("none (other sizes {}, scale {:.2f})", otras, escala_interna_);
++  const Resuelta& r = it->second;
++  return fmt::format("{}x{} host {}x{} written={} age={} frames, other sizes {}, scale {:.2f}", r.imagen.ancho,
++                     r.imagen.alto, r.imagen.fw(), r.imagen.fh(), r.escrita,
++                     r.fotograma_escrito ? int64_t(fotograma_) - int64_t(r.fotograma_escrito) : -1, otras,
++                     escala_interna_);
++}
++
 +uint32_t RenderDk::AnchoResuelta(uint32_t base, int32_t x0, uint32_t ancho_resolve, uint32_t pitch,
 +                                 uint32_t alto) const {
 +  if (!(x0 == 0 && ancho_resolve < pitch && ancho_resolve + 32 > pitch)) {
@@ -6466,7 +7104,7 @@ index dcd46c7..0ed4ba6 100644
    if (frontal_.pendiente && direccion == frontal_.base) {
      MaterializarFrontal();  // a draw samples the front buffer: it gets the copy now
    } else if (frontal_obsoleta_ && direccion == frontal_obsoleta_) {
-@@ -801,11 +1380,47 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
+@@ -801,11 +1399,74 @@ const ImagenDk* RenderDk::TexturaResuelta(uint32_t direccion) {
                    direccion);
      }
    }
@@ -6500,6 +7138,33 @@ index dcd46c7..0ed4ba6 100644
 +         std::get<2>(o->first) == alto;
 +         ++o) {
 +      if (compatible(o->second) && (!actual || o->second.fotograma_escrito >= it->second.fotograma_escrito)) {
++        // 0.1.61 (dialogue bug, lead B): an other-size image returned with no current compatible resolve, or written
++        // more than 2 frames ago, is logged once per address; nfsmw_dk_resuelta_antiga_recusar refuses the stale ones.
++        const Resuelta& otra = o->second;
++        const bool vieja = otra.fotograma_escrito + 2 < fotograma_;
++        if (!actual || vieja) {
++          const bool hay_actual = it != resueltas_.end();
++          const bool mas_vieja_que_actual =
++              hay_actual && it->second.escrita && otra.fotograma_escrito < it->second.fotograma_escrito;
++          const bool recusar = REXCVAR_GET(nfsmw_dk_resuelta_antiga_recusar) && (vieja || mas_vieja_que_actual);
++          // Once per address and kind (bit 0, free in a 4 KB aligned base: stale or not).
++          const uint32_t clave_aviso = direccion | uint32_t(vieja || mas_vieja_que_actual);
++          if (resueltas_antiguas_avisadas_.size() < 64 && resueltas_antiguas_avisadas_.insert(clave_aviso).second) {
++            REXLOG_INFO("[B3 Deko textura] other-size resolve {} base={:08X} fetch={}x{} format={} "
++                        "image={}x{} written_frame={} frame={} stale={} compatible_current={} current: {}",
++                        recusar ? "REFUSED" : "returned", direccion, ancho, alto,
++                        formato_fetch == UINT32_MAX ? int64_t(-1) : int64_t(formato_fetch), otra.imagen.ancho,
++                        otra.imagen.alto, otra.fotograma_escrito, fotograma_, vieja || mas_vieja_que_actual, actual,
++                        hay_actual ? fmt::format("format={} {}x{} written={} written_frame={}",
++                                                 it->second.formato_guest, it->second.imagen.ancho,
++                                                 it->second.imagen.alto, it->second.escrita,
++                                                 it->second.fotograma_escrito)
++                                   : std::string("none"));
++          }
++          if (recusar) {
++            continue;
++          }
++        }
 +        o->second.uso = ++uso_resueltas_;
 +        return &o->second.imagen;
 +      }
@@ -6517,7 +7182,7 @@ index dcd46c7..0ed4ba6 100644
  }
  
  // ---- Copies (resolve and clear)
-@@ -818,7 +1433,8 @@ bool RenderDk::Rechazar(uint32_t causa, const char* texto) {
+@@ -818,7 +1479,8 @@ bool RenderDk::Rechazar(uint32_t causa, const char* texto) {
  }
  
  void RenderDk::Avisar(uint32_t causa, const char* texto) {
@@ -6527,7 +7192,7 @@ index dcd46c7..0ed4ba6 100644
      REXLOG_WARN("[deko3d] {} (causa {})", texto, causa);
    }
  }
-@@ -884,7 +1500,74 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
+@@ -884,7 +1546,77 @@ bool RenderDk::Rectangulo(const RegistrosCopia& reg, uint32_t pitch, int32_t& x0
    return true;
  }
  
@@ -6552,6 +7217,9 @@ index dcd46c7..0ed4ba6 100644
 +
 +bool RenderDk::RestaurarZDesdeResuelta(uint32_t base_fuente, uint32_t base_z, uint32_t ancho,
 +                                       uint32_t alto) {
++  if (frontal_.pendiente && frontal_.base == base_fuente) {
++    MaterializarFrontal();  // a lazy front resolve counts as written this frame: its texture gets the copy first
++  }
 +  const auto it = resueltas_.find(base_fuente);
 +  if (it == resueltas_.end()) return false;
 +  const Resuelta& fuente = it->second;
@@ -6602,7 +7270,7 @@ index dcd46c7..0ed4ba6 100644
    AsegurarTrabajo();
    EmitirCieloPendiente();  // a resolve reads the pass's target: the deferred sky goes in first
    const uint32_t control = reg.rb_copy_control;
-@@ -906,8 +1589,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -906,8 +1638,8 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
    }
    const uint32_t info_color = reg.rb_color_info[origen];
    const uint32_t formato_color = (info_color >> 16) & 0xF;
@@ -6613,7 +7281,7 @@ index dcd46c7..0ed4ba6 100644
      return Rechazar(100 + formato_color, "formato de destino de render todavia no soportado");
    }
    int32_t x0, y0, x1, y1;
-@@ -925,33 +1608,56 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -925,33 +1657,56 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
      Resuelta* resuelta = nullptr;
      uint32_t dx = 0, dy = 0;
      uint32_t base_resuelta = 0;
@@ -6685,7 +7353,7 @@ index dcd46c7..0ed4ba6 100644
      }
      if (resuelta) {
        const uint32_t pedido_ancho = std::min(uint32_t(x1 - x0), destino_render->ancho - uint32_t(x0));
-@@ -966,8 +1672,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -966,8 +1721,9 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
                             (pedido_ancho * 4 >= cabe_ancho * 5 || pedido_alto * 4 >= cabe_alto * 5);
        // nfsmw_nativo_frontal_perezoso: the whole scene to the front buffer of the last Swap, not read back.
        const int32_t maximo_lectura = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
@@ -6697,7 +7365,7 @@ index dcd46c7..0ed4ba6 100644
        const bool frontal = frontal_perezoso && !frontal_apagado_ && base_resuelta == ultimo_frontal_ && !encoger &&
                             !se_lee && x0 == 0 && y0 == 0 && dx == 0 && dy == 0 && ancho == resuelta->imagen.ancho &&
                             alto == resuelta->imagen.alto;
-@@ -978,7 +1685,22 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -978,7 +1734,22 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
        }
        HacerBorradoPendiente(*destino_render);
        CompletarBanda(*destino_render, uint32_t(std::max(y1, 0)), false, 0);
@@ -6721,11 +7389,15 @@ index dcd46c7..0ed4ba6 100644
          if (frontal_.pendiente && frontal_.base != base_resuelta) {
            MaterializarFrontal();
          }
-@@ -986,42 +1708,146 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -986,42 +1757,150 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
          frontal_obsoleta_ = 0;
          resuelta->escrita = true;
          ++resuelta->imagen.version;
 +        resuelta->revision_z_origen = UINT64_MAX;
++        // 0.1.61: written this frame (the age checks of TexturaResuelta compare it), and the per-fetch cache and the
++        // reused textures look again, so a draw that samples it goes through TexturaResuelta and gets the copy.
++        resuelta->fotograma_escrito = fotograma_;
++        ++generacion_texturas_;
          SombraMinimoResueltaEscrita(base_resuelta);
          ++frontales_ahorrados_;
        } else if (uint32_t(x0) < destino_render->ancho && uint32_t(y0) < destino_render->alto && ancho && alto) {
@@ -6885,7 +7557,7 @@ index dcd46c7..0ed4ba6 100644
    if (borrar_color && saltar_repetidos) {
      const uint64_t valor = uint64_t(reg.rb_color_clear) | (uint64_t(reg.rb_color_clear_lo) << 32);
      const auto it = borrado_previo_.find(destino_render->serie);
-@@ -1030,6 +1856,17 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -1030,6 +1909,17 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
        borrar_color = false;
      }
    }
@@ -6903,7 +7575,7 @@ index dcd46c7..0ed4ba6 100644
    if (borrar_color) {
      const uint64_t valor = uint64_t(reg.rb_color_clear) | (uint64_t(reg.rb_color_clear_lo) << 32);
      borrado_previo_[destino_render->serie] = {valor, dibujados_};
-@@ -1039,10 +1876,16 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
+@@ -1039,10 +1929,16 @@ bool RenderDk::Copiar(const RegistrosCopia& reg) {
      // Done when the target is next bound (EmpezarPase), resolved or painted, not now: the front buffer may still be
      // painted from it, and a later clear makes this one unnecessary.
      destino_render->borrado_pendiente = true;
@@ -6921,7 +7593,7 @@ index dcd46c7..0ed4ba6 100644
      } else {
        HacerBorradoPendiente(*destino_render);
      }
-@@ -1060,8 +1903,17 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
+@@ -1060,8 +1956,17 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
      return;
    }
    SombraMinimoAntesDeBorrar(*profundidad);
@@ -6940,7 +7612,7 @@ index dcd46c7..0ed4ba6 100644
    EstadoBorrado& previo = borrado_previo_[profundidad->serie];
    if (saltar_repetidos && previo.dibujos == dibujados_ && previo.valor == reg.rb_depth_clear) {
      ++borrados_saltados_;
-@@ -1072,9 +1924,11 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
+@@ -1072,9 +1977,11 @@ void RenderDk::BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
    profundidad->borrado_z = float(reg.rb_depth_clear >> 8) / 16777215.0f;
    profundidad->borrado_estencil = uint8_t(reg.rb_depth_clear & 0xFF);
    profundidad->borrado_pendiente = true;
@@ -6953,7 +7625,7 @@ index dcd46c7..0ed4ba6 100644
      return;
    }
    HacerBorradoPendiente(*profundidad);
-@@ -1100,8 +1954,106 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
+@@ -1100,8 +2007,107 @@ void RenderDk::HacerBorradoPendiente(ImagenDk& destino) {
    OlvidarEstado();
  }
  
@@ -6966,6 +7638,7 @@ index dcd46c7..0ed4ba6 100644
 +  if (nueva) {
 +    if (b.imagen.viva) {
 +      DestruirImagen(b.imagen);
++      ++generacion_texturas_;  // the per-fetch cache and the reused textures may name its descriptor
 +    }
 +    if (!CrearImagen(b.imagen, DkImageType_2D, DkImageFormat_RGBA8_Unorm, resuelta.ancho, resuelta.alto, 1, 1,
 +                     DkImageFlags_UsageRender, "profundidad en bytes", resuelta.escala)) {
@@ -7061,7 +7734,7 @@ index dcd46c7..0ed4ba6 100644
    if (!area_util || !destino.alto_usado) {
      return destino.alto;
    }
-@@ -1112,12 +2064,15 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
+@@ -1112,12 +2118,15 @@ void RenderDk::BorrarFilas(ImagenDk& destino, uint32_t i, uint32_t desde, uint32
    if (hasta <= desde) {
      return;
    }
@@ -7078,7 +7751,7 @@ index dcd46c7..0ed4ba6 100644
    } else {
      const float* c = destino.borrado_color;
      dkCmdBufClearColorFloat(cmd, i, DkColorMask_RGBA, c[0], c[1], c[2], c[3]);
-@@ -1167,12 +2122,8 @@ void RenderDk::MaterializarFrontal() {
+@@ -1167,12 +2176,8 @@ void RenderDk::MaterializarFrontal() {
    ImagenDk& destino = frontal_.resuelta->imagen;
    if (!Copiar3D(*frontal_.destino, 0, 0, frontal_.ancho, frontal_.alto, destino, 0, 0)) {
      AsegurarTrabajo();
@@ -7093,7 +7766,7 @@ index dcd46c7..0ed4ba6 100644
    }
  }
  
-@@ -1180,6 +2131,10 @@ void RenderDk::IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta) {
+@@ -1180,6 +2185,10 @@ void RenderDk::IntercambiarImagenes(ImagenDk& destino, ImagenDk& resuelta) {
    std::swap(destino.imagen, resuelta.imagen);
    std::swap(destino.memoria, resuelta.memoria);
    std::swap(destino.serie, resuelta.serie);  // the descriptors go with their image
@@ -7104,7 +7777,7 @@ index dcd46c7..0ed4ba6 100644
    ++generacion_texturas_;  // the address now samples another image: the per-fetch cache looks again
    borrado_previo_.erase(destino.serie);  // the target holds another image: its last clear no longer holds
    OlvidarEstado();  // the bound target, if it was this one, is another image now
-@@ -1192,8 +2147,10 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
+@@ -1192,8 +2201,10 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
      return;
    }
    destino.contenido_invalido = false;
@@ -7115,7 +7788,7 @@ index dcd46c7..0ed4ba6 100644
        it->second.imagen.formato != destino.formato) {
      return;  // unknown where it went: the target keeps what it has, as the Vulkan path
    }
-@@ -1204,15 +2161,12 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
+@@ -1204,15 +2215,12 @@ void RenderDk::RestaurarContenido(ImagenDk& destino, bool para_resolver) {
    AsegurarTrabajo();
    EmitirCieloPendiente();
    if (!Copiar3D(it->second.imagen, 0, 0, destino.ancho, destino.alto, destino, 0, 0)) {
@@ -7134,7 +7807,7 @@ index dcd46c7..0ed4ba6 100644
    destino.alto_borrado = destino.alto;  // all of it holds the texture's content now: no band left
    destino.banda_sucia = false;
    ++restauraciones_;
-@@ -1241,19 +2195,16 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+@@ -1241,19 +2249,16 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
    }
    const uint32_t pitch_destino = reg.rb_copy_dest_pitch & 0x3FFF;
    const uint32_t alto_destino = (reg.rb_copy_dest_pitch >> 16) & 0x3FFF;
@@ -7161,7 +7834,7 @@ index dcd46c7..0ed4ba6 100644
    if (!resuelta) {
      return;
    }
-@@ -1273,33 +2224,49 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
+@@ -1273,33 +2278,49 @@ void RenderDk::CopiarProfundidad(const RegistrosCopia& reg, uint32_t pitch, bool
    }
    HacerBorradoPendiente(*profundidad);
    CompletarBanda(*profundidad, uint32_t(std::max(y1, 0)), false, 0);
@@ -7221,7 +7894,7 @@ index dcd46c7..0ed4ba6 100644
    SombraMinimoResueltaEscrita(base);
    ++copias_;
    OlvidarEstado();
-@@ -1421,6 +2388,7 @@ bool RenderDk::SombraMinimoEnVezDeRestaurar(ImagenDk& destino) {
+@@ -1421,6 +2442,7 @@ bool RenderDk::SombraMinimoEnVezDeRestaurar(ImagenDk& destino) {
    destino.borrado_z = 1.0f;
    destino.borrado_estencil = 0;
    destino.borrado_pendiente = true;  // EmpezarPase clears it right after binding it
@@ -7229,7 +7902,7 @@ index dcd46c7..0ed4ba6 100644
    borrado_previo_.erase(destino.serie);  // not the game's clear: its next one cannot be skipped
    sm_ciclo_borrado_ = true;
    return true;
-@@ -1516,7 +2484,16 @@ const ImagenDk* RenderDk::CompaneraSombraCoches(bool capaz, uint32_t ps) {
+@@ -1516,7 +2538,16 @@ const ImagenDk* RenderDk::CompaneraSombraCoches(bool capaz, uint32_t ps) {
  void RenderDk::LeerResuelta(const RegistrosCopia& reg, const ImagenDk& imagen, int32_t x0, int32_t y0, uint32_t dx,
                              uint32_t dy, uint32_t ancho, uint32_t alto) {
    const int32_t maximo = REXCVAR_GET(nfsmw_nativo_leer_resueltas_texels);
@@ -7247,7 +7920,7 @@ index dcd46c7..0ed4ba6 100644
      return;
    }
    LecturasRanura& l = lecturas_[trabajo_ % kRanuras];
-@@ -1558,7 +2535,10 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
+@@ -1558,7 +2589,10 @@ void RenderDk::EscribirLecturas(uint32_t ranura) {
    for (const LecturaDk& p : l.pendientes) {
      dkMemBlockFlushCpuCache(lectura_bloque_, p.offset, p.ancho * p.alto * 4);  // what the GPU wrote, not the cache
      const uint8_t* const datos = lectura_cpu_ + p.offset;
@@ -7259,7 +7932,7 @@ index dcd46c7..0ed4ba6 100644
      const uint32_t orden_copia = p.info & 0x7;  // Endian128: 0-3 as xenos::Endian
      const auto orden = orden_copia <= 3 ? static_cast<xenos::Endian>(orden_copia) : xenos::Endian::k8in32;
      // Each texel is a permutation of its 4 bytes (R/B swap plus GpuSwap), computed once with marked bytes.
-@@ -1670,6 +2650,29 @@ bool RenderDk::CrearShadersSalida() {
+@@ -1670,6 +2704,29 @@ bool RenderDk::CrearShadersSalida() {
    }
    const deko::Compilador::Resultado color = compilador_.Compilar(false, kFsCopiaColor);
    fs_copia_color_valido_ = color.ok && nucleo_.CargarShader(fs_copia_color_, color.dksh, "copia de color");
@@ -7289,7 +7962,7 @@ index dcd46c7..0ed4ba6 100644
    const deko::Compilador::Resultado z = compilador_.Compilar(false, kFsCopiaProfundidad);
    fs_copia_profundidad_valido_ = z.ok && nucleo_.CargarShader(fs_copia_profundidad_, z.dksh, "copia de profundidad");
    if (!fs_copia_color_valido_ || !fs_copia_profundidad_valido_) {
-@@ -1680,7 +2683,7 @@ bool RenderDk::CrearShadersSalida() {
+@@ -1680,7 +2737,7 @@ bool RenderDk::CrearShadersSalida() {
  }
  
  const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
@@ -7298,7 +7971,7 @@ index dcd46c7..0ed4ba6 100644
    if (rampas_[variante]) {
      return rampas_[variante].get();
    }
-@@ -1693,6 +2696,7 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
+@@ -1693,6 +2750,7 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
    glsl += (variante & kRampaGraduacion) ? "#define GRADUACION 1\n" : "#define GRADUACION 0\n";
    glsl += (variante & kRampaFxaa) ? "#define FXAA 1\n" : "#define FXAA 0\n";
    glsl += rampa_gamma_ ? "#define RAMPA 1\n" : "#define RAMPA 0\n";
@@ -7306,7 +7979,7 @@ index dcd46c7..0ed4ba6 100644
    glsl += kFsRampa;
    const uint64_t inicio = deko::AhoraNs();
    const deko::Compilador::Resultado r = compilador_.Compilar(false, glsl);
-@@ -1701,9 +2705,9 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
+@@ -1701,9 +2759,9 @@ const DkShader* RenderDk::ShaderRampa(uint32_t variante) {
      REXLOG_ERROR("[deko3d] no se pudo compilar la variante {} del pixel shader de la salida: {}", variante, r.log);
      return nullptr;
    }
@@ -7318,7 +7991,7 @@ index dcd46c7..0ed4ba6 100644
    rampas_[variante] = std::move(shader);
    return rampas_[variante].get();
  }
-@@ -1720,14 +2724,33 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1720,14 +2778,33 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
      version_posproceso_ = version;
      RecalcularRampa();
    }
@@ -7354,7 +8027,7 @@ index dcd46c7..0ed4ba6 100644
    if (!fs) {
      fs = ShaderRampa(kRampaExacta);
    }
-@@ -1757,10 +2780,20 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1757,10 +2834,20 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
      return false;
    }
    const int32_t desplazamiento[4] = {0, 0, 0, 0};
@@ -7376,7 +8049,7 @@ index dcd46c7..0ed4ba6 100644
    const uint32_t ranura = VistaDe(origen, 0x688 /* RGBA */, 0x688);
    const uint32_t ranura_tabla = VistaDe(rampa_tabla_, 0x688, 0x688);
    DkCmdBuf cmd = nucleo_.comandos();
-@@ -1798,11 +2831,28 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
+@@ -1798,11 +2885,28 @@ bool RenderDk::PintarSalida(DkImage& salida, uint32_t ancho_salida, uint32_t alt
    dkCmdBufBindTexture(cmd, DkStage_Fragment, 0, dkMakeTextureHandle(ranura, 0));
    dkCmdBufBindTexture(cmd, DkStage_Fragment, 1, dkMakeTextureHandle(ranura_tabla, 0));
    dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3, 1, 0, 0);
@@ -7405,7 +8078,7 @@ index dcd46c7..0ed4ba6 100644
    RexSwitchPerfCount(0);  // the profiler's "juego N fps"
    const uint64_t ahora = deko::AhoraNs();
    if (ultimo_swap_ns_) {
-@@ -1831,20 +2881,29 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1831,20 +2935,29 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    ultimo_frontal_ = base;  // nfsmw_nativo_frontal_perezoso: the next resolve here may go to the Swap directly
    // The front buffer is still in its render target (and the texture was not written): painted from there.
    const bool desde_destino = frontal_.pendiente && frontal_.base == base;
@@ -7437,7 +8110,7 @@ index dcd46c7..0ed4ba6 100644
    const uint32_t ancho_origen = desde_destino ? frontal_.ancho : (origen ? origen->ancho : 0);
    const uint32_t alto_origen = desde_destino ? frontal_.alto : (origen ? origen->alto : 0);
    if (!origen) {
-@@ -1852,15 +2911,41 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1852,15 +2965,41 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    } else if (presentador) {
      const uint32_t w = std::min(ancho ? ancho : ancho_origen, ancho_origen);
      const uint32_t h = std::min(alto ? alto : alto_origen, alto_origen);
@@ -7481,7 +8154,7 @@ index dcd46c7..0ed4ba6 100644
            MaterializarFrontal();
            fuente = TexturaResuelta(base);
          } else {
-@@ -1876,6 +2961,10 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1876,6 +3015,10 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    if (!llamada) {
      CerrarTrabajo();
    }
@@ -7492,7 +8165,7 @@ index dcd46c7..0ed4ba6 100644
    ++fotograma_;
    geometria_.NuevoFotograma(fotograma_);
    PerfilAlCambiarDeFotograma();
-@@ -1886,10 +2975,226 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
+@@ -1886,10 +3029,226 @@ bool RenderDk::Presentar(rex::ui::Presenter* presentador, const TexturaSwap& swa
    CerrarFotogramaDeLaGuardiaDelCielo();
    SoltarTexturasSiHaceFalta();
    GuardarCacheSiHaceFalta(false);
@@ -7720,7 +8393,7 @@ index dcd46c7..0ed4ba6 100644
  // ---- The DKSH cache file and the report
  
  void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
-@@ -1899,29 +3204,43 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
+@@ -1899,29 +3258,43 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
    }
    cache_sucia_ = false;
    cache_guardada_ns_ = ahora;
@@ -7784,7 +8457,7 @@ index dcd46c7..0ed4ba6 100644
    };
    // One write at a time, on a thread that is joined, never detached: libnx has no pthread_detach, and
    // std::thread::detach() throws (std::system_error, "Function not implemented") and ends the process.
-@@ -1931,7 +3250,7 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
+@@ -1931,7 +3304,7 @@ void RenderDk::GuardarCacheSiHaceFalta(bool ya) {
    if (ya) {
      escribir();
    } else {
@@ -7793,7 +8466,7 @@ index dcd46c7..0ed4ba6 100644
    }
  }
  
-@@ -2224,7 +3543,86 @@ void RenderDk::InformeDelPerfil() {
+@@ -2224,7 +3597,86 @@ void RenderDk::InformeDelPerfil() {
  
  // ---- Statistics for the system's report
  
@@ -7881,7 +8554,7 @@ index dcd46c7..0ed4ba6 100644
  
  EstadisticasDibujos RenderDk::EstadisticasDeDibujos() const {
    EstadisticasDibujos e;
-@@ -2286,4 +3684,432 @@ std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* prov
+@@ -2286,4 +3738,434 @@ std::unique_ptr<DestinosNativos> CrearDestinosDeko3d(deko::ProveedorDeko3d* prov
    return std::make_unique<RenderDk>(*proveedor, memoria, hooks);
  }
  
@@ -7898,6 +8571,7 @@ index dcd46c7..0ed4ba6 100644
 +
 +void RenderDk::VolcarPosProcesso(uint32_t base, CapturaPosProcesso etapa) {
 +  if (!volcado_swap_) return;
++  if (frontal_.pendiente && frontal_.base == base) MaterializarFrontal();  // lazy front: the texture gets its copy
 +  const auto it = resueltas_.find(base);
 +  if (it == resueltas_.end() || !it->second.escrita ||
 +      it->second.fotograma_escrito != fotograma_ || it->second.imagen.profundidad) return;
@@ -7959,6 +8633,7 @@ index dcd46c7..0ed4ba6 100644
 +
 +void RenderDk::VolcarEntrada(uint32_t base, uint32_t dibujo, uint32_t ranura) {
 +  if (!volcado_swap_) return;
++  if (frontal_.pendiente && frontal_.base == base) MaterializarFrontal();  // lazy front: the texture gets its copy
 +  const auto it = resueltas_.find(base);
 +  if (it == resueltas_.end() || !it->second.escrita || it->second.fotograma_escrito != fotograma_ ||
 +      it->second.imagen.profundidad || !IniciarVolcado()) return;
@@ -8315,7 +8990,7 @@ index dcd46c7..0ed4ba6 100644
 +
  }  // namespace rex::x360
 diff --git a/src/x360/deko/dibujos.cpp b/src/x360/deko/dibujos.cpp
-index e3fb6f1..6f73afb 100644
+index e3fb6f1..2a6c3e8 100644
 --- a/src/x360/deko/dibujos.cpp
 +++ b/src/x360/deko/dibujos.cpp
 @@ -12,7 +12,10 @@
@@ -8368,15 +9043,35 @@ index e3fb6f1..6f73afb 100644
  REXCVAR_DEFINE_BOOL(nfsmw_nativo_z_temprana, true, "NFSMW",
                      "Renderizador nativo (20/09): en los dibujos que prueban la profundidad pero NO la "
                      "escriben (humo, particulas, cristales, calcomanias), declarar EarlyFragmentTests en el "
-@@ -74,6 +89,7 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sin_ps_sin_color, true, "NFSMW",
+@@ -64,9 +79,9 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_cielo_aplazado, true, "NFSMW",
+                     "Renderizador nativo (22/09): aplazar el dibujo del cielo hasta despues de los opacos "
+                     "del mismo pase, en vez de dibujarlo el primero sobre un Z-buffer vacio. Es un solo "
+                     "dibujo opaco que prueba la profundidad y no la escribe, asi que la imagen es identica");
++// 0.1.61: kept so older TOML files still load; its path never ran (see Dibujar) and was removed.
+ REXCVAR_DEFINE_BOOL(nfsmw_dk_constantes_por_diferencias, true, "NFSMW",
+-                    "deko3d: las constantes de los shaders se mandan por diferencias (solo los registros que cambiaron, "
+-                    "dentro de la lista de comandos) en vez de copiar el bloque entero en cada dibujo. false = copiar")
++                    "Obsolete (deko3d): the constants-by-differences path was removed in 0.1.61 (it never ran). Not used")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sin_ps_sin_color, true, "NFSMW",
+                     "Renderizador nativo (17/09, build 157): en los dibujos que no escriben ningun color, sin etapa de "
+@@ -74,9 +89,15 @@ REXCVAR_DEFINE_BOOL(nfsmw_nativo_sin_ps_sin_color, true, "NFSMW",
  // Defined in nfsmw_dk_destinos.cpp (the game hooks read them too).
  REXCVAR_DECLARE(bool, nfsmw_sombras_sin_vegetacion);
  REXCVAR_DECLARE(bool, nfsmw_dk_perfil_barrera);
 +REXCVAR_DECLARE(bool, nfsmw_dk_compartidas_push);  // destinos.cpp
  REXCVAR_DECLARE(bool, nfsmw_dk_perfil_variantes);
  REXCVAR_DECLARE(bool, nfsmw_nativo_ps_solo_alfa);
++REXCVAR_DECLARE(bool, nfsmw_dk_informe_periodico);  // xboxkrnl_io.cpp; the app mirrors b3_log_periodico into it
  // deko3d only.
-@@ -85,6 +101,22 @@ REXCVAR_DEFINE_BOOL(nfsmw_dk_compilar_en_fondo, true, "NFSMW",
++REXCVAR_DEFINE_BOOL(nfsmw_dk_memo_shaders, true, "NFSMW",
++                    "deko3d (0.1.61): each shader stage remembers its last lookup (shader entry, specialization, "
++                    "outputs and variant -> loaded shader, and the entry's info), so consecutive draws with the same "
++                    "shaders skip the hash map lookups. Same shaders. false = look them up on every draw as before");
+ REXCVAR_DEFINE_BOOL(nfsmw_dk_compilar_en_fondo, true, "NFSMW",
+                     "deko3d: la variante exacta de un vertex shader que no esta en la cache se compila en segundo "
+                     "plano; mientras, dibuja la que conserva todos los interpoladores. false = se compila en el acto")
+@@ -85,6 +106,22 @@ REXCVAR_DEFINE_BOOL(nfsmw_dk_compilar_en_fondo, true, "NFSMW",
  namespace rex::x360 {
  namespace {
  
@@ -8399,7 +9094,7 @@ index e3fb6f1..6f73afb 100644
  namespace gr = rex::graphics;
  namespace xenos = rex::graphics::xenos;
  
-@@ -115,8 +147,8 @@ constexpr uint32_t kVarianteResplandorSuave = 4;
+@@ -115,57 +152,10 @@ constexpr uint32_t kVarianteResplandorSuave = 4;
  constexpr uint32_t kPalabraInvTamano = 90;
  constexpr uint32_t kMaxVerticesPorDibujo = uint32_t(1) << 20;
  constexpr uint32_t kUboBytesVs = 256 * 16;
@@ -8409,8 +9104,57 @@ index e3fb6f1..6f73afb 100644
 +constexpr uint32_t kUboBytesCompartidas = 85 * 16;
  constexpr uint32_t kTodasLasSalidas = ~0u;
  
- // The 16-byte registers of [desde, hasta) (bytes) that differ from `sombra` are pushed into the block at `bloque` and
-@@ -266,9 +298,17 @@ void IndicesDe32(const uint8_t* datos, uint32_t cuenta, bool indices32, xenos::E
+-// The 16-byte registers of [desde, hasta) (bytes) that differ from `sombra` are pushed into the block at `bloque` and
+-// copied to `sombra`; runs of changed registers go in one push. Returns the registers pushed.
+-uint32_t EmpujarDiferencias(DkCmdBuf cmd, DkGpuAddr bloque, uint32_t tam_bloque, const uint32_t* actual,
+-                            uint32_t* sombra, uint32_t desde, uint32_t hasta, uint64_t& empujes) {
+-  auto iguales = [&](uint32_t r) {
+-    uint64_t a[2], b[2];
+-    std::memcpy(a, actual + r * 4, 16);
+-    std::memcpy(b, sombra + r * 4, 16);
+-    return a[0] == b[0] && a[1] == b[1];
+-  };
+-  uint32_t empujados = 0;
+-  const uint32_t fin = hasta / 16;
+-  for (uint32_t r = desde / 16; r < fin;) {
+-#if defined(__aarch64__)
+-    // Four registers (64 bytes) at a time while they are all equal: most of the block does not change between draws.
+-    while (r + 4 <= fin) {
+-      const uint8_t* a = reinterpret_cast<const uint8_t*>(actual + r * 4);
+-      const uint8_t* b = reinterpret_cast<const uint8_t*>(sombra + r * 4);
+-      const uint8x16_t d = vorrq_u8(vorrq_u8(veorq_u8(vld1q_u8(a), vld1q_u8(b)), veorq_u8(vld1q_u8(a + 16), vld1q_u8(b + 16))),
+-                                    vorrq_u8(veorq_u8(vld1q_u8(a + 32), vld1q_u8(b + 32)), veorq_u8(vld1q_u8(a + 48), vld1q_u8(b + 48))));
+-      if (vmaxvq_u8(d) != 0) {
+-        break;
+-      }
+-      r += 4;
+-    }
+-    if (r >= fin) {
+-      break;
+-    }
+-#endif
+-    if (iguales(r)) {
+-      ++r;
+-      continue;
+-    }
+-    uint32_t f = r + 1;
+-    while (f < fin && !iguales(f)) {
+-      ++f;
+-    }
+-    const uint32_t bytes = (f - r) * 16;
+-    dkCmdBufPushConstants(cmd, bloque, tam_bloque, r * 16, bytes, actual + r * 4);
+-    std::memcpy(sombra + r * 4, actual + r * 4, bytes);
+-    empujados += f - r;
+-    ++empujes;
+-    r = f;
+-  }
+-  return empujados;
+-}
+-
+ // The per-fetch cache's slot: a multiply-xor mix of the six words of a texture fetch constant (it was an XXH3 call per
+ // sampler per draw; the slot is checked against the whole words anyway).
+ inline uint64_t ClaveFetch(const uint32_t* f) {
+@@ -266,9 +256,17 @@ void IndicesDe32(const uint8_t* datos, uint32_t cuenta, bool indices32, xenos::E
        std::memcpy(&crudo, datos + size_t(i) * 4, 4);
        v = xenos::GpuSwap(crudo, orden) & 0xFFFFFF;
      } else {
@@ -8431,7 +9175,7 @@ index e3fb6f1..6f73afb 100644
      }
      if (reinicio && v == indice_reinicio) {
        if constexpr (kEscribir) {
-@@ -392,6 +432,27 @@ DkBlendOp OperacionDe(uint32_t op) {
+@@ -392,6 +390,27 @@ DkBlendOp OperacionDe(uint32_t op) {
    }
  }
  
@@ -8459,7 +9203,7 @@ index e3fb6f1..6f73afb 100644
  template <class T>
  bool Iguales(const T& a, const T& b) {
    return std::memcmp(&a, &b, sizeof(T)) == 0;
-@@ -474,11 +535,20 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
+@@ -474,11 +493,20 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
      a.type = DkVtxAttribType_Float;
    }
    uint32_t ubicaciones_usadas = 0;
@@ -8480,7 +9224,7 @@ index e3fb6f1..6f73afb 100644
        const size_t i = size_t(otro.instruccion) * 3;
        if (((parcheado[i] >> 12) & 0x3F) != registro || (parcheado[i] & 0x1F) != 0) {
          continue;
-@@ -494,12 +564,59 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
+@@ -494,12 +522,59 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
      if (q == SIZE_MAX) {
        return Rechazar(21, "fetch de vertices no encontrado en el VS parcheado");
      }
@@ -8543,7 +9287,7 @@ index e3fb6f1..6f73afb 100644
      if (ubicacion < 0 || ubicacion >= 16 || ((ubicaciones_usadas >> ubicacion) & 0x1)) {
        Avisar(22, "elemento de vertices sin ubicacion libre en el shader: se omite");
        continue;
-@@ -507,8 +624,8 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
+@@ -507,8 +582,8 @@ bool RenderDk::CalcularEntrada(const PeticionDibujo& p, EntradaVerticesDk& entra
      DkVtxAttribSize tamano;
      DkVtxAttribType tipo;
      bool r11g11b10 = false;
@@ -8554,7 +9298,7 @@ index e3fb6f1..6f73afb 100644
        return Rechazar(300 + formato, "formato de vertice todavia no soportado");
      }
      if (r11g11b10) {
-@@ -569,6 +686,11 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
+@@ -569,6 +644,11 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
      centro_x += float(ventana_x);
      centro_y += float(ventana_y);
    }
@@ -8566,7 +9310,7 @@ index e3fb6f1..6f73afb 100644
    if (pase_escala_ != 1.0f) {
      escala_x *= pase_escala_;
      centro_x *= pase_escala_;
-@@ -580,7 +702,7 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
+@@ -580,7 +660,7 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
    // A negative YSCALE (the D3D norm) gives a positive height; a positive one, an inverted height.
    viewport[1] = centro_y + escala_y;
    viewport[3] = -2.0f * escala_y;
@@ -8575,7 +9319,7 @@ index e3fb6f1..6f73afb 100644
      Avisar(14, "espacio de recorte OpenGL (dx_clip_space_def = 0): Z sin ajustar");
    }
    viewport[4] = std::clamp(centro_z, 0.0f, 1.0f);
-@@ -616,6 +738,17 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
+@@ -616,6 +696,17 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
      x1 += ventana_x;
      y1 += ventana_y;
    }
@@ -8593,7 +9337,7 @@ index e3fb6f1..6f73afb 100644
    if (pase_escala_ != 1.0f) {
      x0 = int32_t(std::floor(float(x0) * pase_escala_));
      y0 = int32_t(std::floor(float(y0) * pase_escala_));
-@@ -635,12 +768,13 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
+@@ -635,12 +726,13 @@ uint32_t RenderDk::CalcularEncuadre(const uint32_t* r, uint32_t vte, bool sin_re
  
  // ---- Render targets of a draw. Nothing to close or open: binding others is all a pass change costs.
  
@@ -8609,7 +9353,7 @@ index e3fb6f1..6f73afb 100644
        if (!imagenes[i]) {
          return Rechazar(40, "no hay destino de color");
        }
-@@ -663,6 +797,8 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+@@ -663,6 +755,8 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
    AntesDe3D();
    // Creating a target records its first clear and forgets the emitted state: the binding comes after.
    uint32_t ancho = UINT32_MAX, alto = UINT32_MAX;
@@ -8618,7 +9362,7 @@ index e3fb6f1..6f73afb 100644
    DkImageView vistas[4];
    const DkImageView* colores[4] = {};
    uint32_t n = 0;
-@@ -671,15 +807,19 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+@@ -671,15 +765,19 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
        dkImageViewDefaults(&vistas[n], &imagenes[i]->imagen);
        colores[n] = &vistas[n];
        ++n;
@@ -8642,7 +9386,7 @@ index e3fb6f1..6f73afb 100644
    }
    const uint32_t categoria = CategoriaDeDestino(pitch, claves);  // GPU time by pass type (the C2 report)
    categoria_pase_ = categoria;
-@@ -730,7 +870,14 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
+@@ -730,7 +828,14 @@ bool RenderDk::EmpezarPase(const uint64_t claves[5], uint32_t pitch) {
    g_.pase_alto = alto;
    ++serie_imagenes_;  // a new pass: the framing cache keys on it
    g_.pase_serie = serie_imagenes_;
@@ -8658,7 +9402,7 @@ index e3fb6f1..6f73afb 100644
    return true;
  }
  
-@@ -753,7 +900,7 @@ void RenderDk::EmitirCieloPendiente() {
+@@ -753,7 +858,7 @@ void RenderDk::EmitirCieloPendiente() {
    dkCmdBufBindColorWriteState(cmd, &e.mascaras);
    for (uint32_t i = 0; i < 4; ++i) {
      if ((e.color.blendEnableMask >> i) & 0x1) {
@@ -8667,7 +9411,45 @@ index e3fb6f1..6f73afb 100644
      }
    }
    dkCmdBufBindDepthStencilState(cmd, &e.profundidad);
-@@ -857,7 +1004,9 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
+@@ -830,6 +935,13 @@ void RenderDk::CerrarFotogramaDeLaGuardiaDelCielo() {
+ // ---- Shaders
+ 
+ RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
++  // nfsmw_dk_memo_shaders: the last entry of this stage. Its info is complete once remembered (nothing below changes
++  // it again) and info_shaders_ never erases, so the reference stays valid.
++  const bool memo = REXCVAR_GET(nfsmw_dk_memo_shaders);
++  MemoInfo& m = memo_info_[entrada.vertices ? 1 : 0];
++  if (memo && m.entrada == &entrada) {
++    return *m.info;
++  }
+   InfoShader& info = info_shaders_[&entrada];
+   if (!info.huella) {
+     const auto& espirv = entrada.spirv;
+@@ -841,11 +953,23 @@ RenderDk::InfoShader& RenderDk::InfoDe(const EntradaShader& entrada) {
+     info.interpoladores = deko::SpirvAGlsl(entrada.spirv, 0).interpoladores;
+     info.interpoladores_listos = true;
+   }
++  if (memo && info.huella && (entrada.vertices || info.interpoladores_listos)) {
++    m.entrada = &entrada;
++    m.info = &info;
++  }
+   return info;
+ }
+ 
+ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especializacion, uint32_t salidas,
+                                    uint32_t variante_ps) {
++  // nfsmw_dk_memo_shaders: the same arguments as this stage's last answer found in cargados_ give that answer again
++  // (the key below is made from them and the entry's fixed mask and flags; cargados_ keeps its shaders until erased).
++  const bool memo = REXCVAR_GET(nfsmw_dk_memo_shaders);
++  MemoShader& m = memo_shaders_[entrada.vertices ? 1 : 0];
++  if (memo && m.entrada == &entrada && m.especializacion == especializacion && m.salidas == salidas &&
++      m.variante_ps == variante_ps) {
++    return m.shader;
++  }
+   InfoShader& info = InfoDe(entrada);
+   // The SPIR-V: the library's, or the bright pass replaced by a glow variant (same inputs and constants, so the
+   // library shader's mask applies).
+@@ -857,9 +981,14 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
      }
    }
    const uint32_t espec = especializacion & info.mascara;
@@ -8677,8 +9459,13 @@ index e3fb6f1..6f73afb 100644
 +      ? (entrada.entradas_renut_compactas ? kTodasLasSalidas : salidas) : variante_ps;
    const ClaveCargado clave{&entrada, espec, variante};
    if (const auto it = cargados_.find(clave); it != cargados_.end()) {
++    if (memo) {
++      m = MemoShader{&entrada, especializacion, salidas, variante_ps, it->second.get()};
++    }
      return it->second.get();
-@@ -894,8 +1043,18 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
+   }
+   const deko::CacheDksh::Clave clave_cache{info.huella, espec, variante};
+@@ -894,8 +1023,19 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
    };
    if (const std::vector<uint8_t>* dksh = cache_.Buscar(clave_cache)) {
      ++aciertos_cache_;
@@ -8686,6 +9473,7 @@ index e3fb6f1..6f73afb 100644
 +    if (const DkShader* shader = cargar(*dksh)) return shader;
 +    if (variante_ps == kDekoDofReduzido) {
 +      cargados_.erase(clave);
++      memo_shaders_ = {};  // nfsmw_dk_memo_shaders: nothing remembered may name an erased entry
 +      const DkShader* original = ShaderDe(entrada, especializacion, salidas);
 +      return original;
 +    }
@@ -8698,7 +9486,7 @@ index e3fb6f1..6f73afb 100644
    static const bool en_fondo = REXCVAR_GET(nfsmw_dk_compilar_en_fondo);
    if (entrada.vertices && variante != kTodasLasSalidas && en_fondo &&
        cache_.Buscar({info.huella, espec, kTodasLasSalidas})) {
-@@ -947,7 +1106,8 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
+@@ -947,7 +1087,8 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
    }
    // On the spot (it blocks the ring thread for one compile: ~40-100 ms on the console).
    const uint64_t inicio = deko::AhoraNs();
@@ -8708,7 +9496,7 @@ index e3fb6f1..6f73afb 100644
    if (g.glsl.empty()) {
      REXLOG_ERROR("[deko3d] {}: no se pudo pasar a GLSL: {}", nombre, g.error);
      cargados_.emplace(clave, nullptr);
-@@ -968,6 +1128,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
+@@ -968,6 +1109,7 @@ const DkShader* RenderDk::ShaderDe(const EntradaShader& entrada, uint32_t especi
                  double(deko::AhoraNs() - inicio) / 1e6, r.dksh.size());
    }
    cache_.Anadir(clave_cache, r.dksh);
@@ -8716,7 +9504,7 @@ index e3fb6f1..6f73afb 100644
    cache_sucia_ = true;
    return cargar(r.dksh);
  }
-@@ -982,6 +1143,7 @@ void RenderDk::RecogerCompilaciones() {
+@@ -982,6 +1124,7 @@ void RenderDk::RecogerCompilaciones() {
      bandeja_->fallidas = 0;
    }
    for (auto& [clave, dksh] : hechas) {
@@ -8724,7 +9512,7 @@ index e3fb6f1..6f73afb 100644
      cache_.Anadir(clave, std::move(dksh));
      ++compilados_en_fondo_;
      cache_sucia_ = true;
-@@ -993,6 +1155,76 @@ void RenderDk::RecogerCompilaciones() {
+@@ -993,6 +1136,82 @@ void RenderDk::RecogerCompilaciones() {
  
  // ---- The draw
  
@@ -8793,15 +9581,32 @@ index e3fb6f1..6f73afb 100644
 +  dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, &sonda, 1);
 +  dkCmdBufBindStorageBuffer(cmd, DkStage_Vertex, 13, volcado_gpu_ + offset, kBytes);
 +  dkCmdBufDraw(cmd, DkPrimitive_Points, cantidad, 1, 0, 0);
-+  const DkShader* restored[] = {original, g_.ps};
-+  dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, restored, 2);
++  // Every stage the draw had (unused stages in the mask are unbound): RectangleList's geometry shader too.
++  if (g_.gs) {
++    const DkShader* restored[] = {original, g_.gs, g_.ps};
++    dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, restored, 3);
++  } else {
++    const DkShader* restored[] = {original, g_.ps};
++    dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, restored, 2);
++  }
 +  dkCmdBufBindRasterizerState(cmd, &g_.raster);
 +}
 +
  bool RenderDk::Dibujar(const PeticionDibujo& p) {
    const uint32_t* r = p.registros;
    if (!r || !p.vs || p.vs->spirv.empty()) {
-@@ -1008,6 +1240,16 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1002,12 +1221,27 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+   const uint64_t espera_inicio_ns = nucleo_.NsEsperandoValla();  // waits for the GPU are not recording time
+   // Stage times (ns_etapas_), without the waits for the GPU that may happen inside a stage.
+   uint64_t marca_etapa = inicio_ns, espera_etapa = espera_inicio_ns;
++  // 0.1.61: only the periodic report reads them; with it off no clock is read per stage.
++  const bool medir_etapas = REXCVAR_GET(nfsmw_dk_informe_periodico);
+   auto cortar_etapa = [&](uint32_t etapa) {
++    if (!medir_etapas) {
++      return;
++    }
+     const uint64_t ahora = deko::AhoraNs(), espera = nucleo_.NsEsperandoValla();
+     ns_etapas_[etapa] += (ahora - marca_etapa) - (espera - espera_etapa);
      marca_etapa = ahora;
      espera_etapa = espera;
    };
@@ -8818,7 +9623,7 @@ index e3fb6f1..6f73afb 100644
    // A guest wait for the GPU: the game may rewrite vertex memory it already drew from (DedupeVertices).
    if (const uint32_t sinc = g_sincronizaciones_anillo.load(std::memory_order_relaxed); sinc != dedupe_sinc_vista_) {
      dedupe_sinc_vista_ = sinc;
-@@ -1056,9 +1298,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1056,9 +1290,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        primitiva = DkPrimitive_TriangleStrip;
        admite_reinicio = true;
        break;
@@ -8836,7 +9641,7 @@ index e3fb6f1..6f73afb 100644
      default:
        return Rechazar(100 + tipo, "tipo de primitiva todavia no soportado");
    }
-@@ -1078,7 +1328,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1078,7 +1320,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    // --- Render targets and what can be skipped
    const uint32_t pitch = r[gr::XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFF;
    const uint32_t mascara_registro =
@@ -8845,7 +9650,7 @@ index e3fb6f1..6f73afb 100644
    static constexpr uint32_t kInfoColor[4] = {gr::XE_GPU_REG_RB_COLOR_INFO, gr::XE_GPU_REG_RB_COLOR1_INFO,
                                               gr::XE_GPU_REG_RB_COLOR2_INFO, gr::XE_GPU_REG_RB_COLOR3_INFO};
    static constexpr uint32_t kMezcla[4] = {gr::XE_GPU_REG_RB_BLENDCONTROL0, gr::XE_GPU_REG_RB_BLENDCONTROL1,
-@@ -1093,8 +1343,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1093,8 +1335,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      }
      const uint32_t info = r[kInfoColor[i]];
      const uint32_t formato = (info >> 16) & 0xF;
@@ -8855,7 +9660,7 @@ index e3fb6f1..6f73afb 100644
        return Rechazar(200 + formato, "formato de destino de color todavia no soportado");
      }
      claves[i] = (uint64_t(1) << 63) | (uint64_t(info & 0xFFF) << 24) | (uint64_t(formato) << 16) | pitch;
-@@ -1103,7 +1352,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1103,7 +1344,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    }
    const uint32_t control_profundidad = r[gr::XE_GPU_REG_RB_DEPTHCONTROL];
    // Draws that cannot change a pixel (nfsmw_nativo_saltar_invisibles; the Vulkan backend explains both cases).
@@ -8864,7 +9669,7 @@ index e3fb6f1..6f73afb 100644
    if (saltar_invisibles && mascaras) {
      const uint32_t control_color = r[gr::XE_GPU_REG_RB_COLORCONTROL];
      const bool alfa_nunca = ((control_color >> 3) & 0x1) && (control_color & 0x7) == 0;
-@@ -1133,12 +1382,13 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1133,12 +1374,13 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    if (!mascaras && ps) {
      const uint32_t control_color = r[gr::XE_GPU_REG_RB_COLORCONTROL];
      const bool prueba_alfa = ((control_color >> 3) & 0x1) && (control_color & 0x7) != 7;
@@ -8880,7 +9685,7 @@ index e3fb6f1..6f73afb 100644
        // Only the alpha test is left (vegetation in the shadow map): not drawn (nfsmw_sombras_sin_vegetacion).
        return true;
      }
-@@ -1155,7 +1405,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1155,7 +1397,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
  
    // --- Depth bias (GetPreferredFacePolygonOffset and command_processor.cpp's scale, as the Vulkan backend)
    const uint32_t desplazamiento = r[gr::XE_GPU_REG_VGT_INDX_OFFSET] & 0xFFFFFF;
@@ -8889,7 +9694,7 @@ index e3fb6f1..6f73afb 100644
    float escala_sesgo = 0.0f, desplazamiento_sesgo = 0.0f;
    if (tipo >= 4) {
      if (((modo_sc >> 11) & 0x1) && !(modo_sc & 0x1)) {
-@@ -1174,10 +1424,25 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1174,10 +1416,25 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
                                                  ? float(uint32_t(1) << 24)
                                                  : float((uint32_t(1) << 24) - 1)),
                      escala_sesgo * (1.0f / 16.0f)};
@@ -8916,7 +9721,7 @@ index e3fb6f1..6f73afb 100644
    const bool con_sesgo = sesgo[0] != 0.0f || sesgo[1] != 0.0f;
  
    // --- Vertex range and indices
-@@ -1205,6 +1470,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1205,6 +1462,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      indices_datos = datos;
      indices_orden = orden;
      indice_reinicio = r[gr::XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX] & 0xFFFFFF;
@@ -8927,7 +9732,7 @@ index e3fb6f1..6f73afb 100644
      // The usual case: 16 bits without restart or offset, uploaded as 16 bits. The rest as 32 bits.
      indices_de_16 = !indices32 && !reinicio && !desplazamiento &&
                      (orden == xenos::Endian::k8in16 || orden == xenos::Endian::kNone);
-@@ -1255,7 +1524,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1255,7 +1516,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      uint32_t bytes;
    };
    std::array<Origen, 16> origenes{};
@@ -8939,7 +9744,7 @@ index e3fb6f1..6f73afb 100644
    for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
      const EntradaVerticesDk::Enlace& enlace = entrada->enlaces[b];
      const uint32_t d0 = r[kRegFetch + enlace.ranura * 2];
-@@ -1272,12 +1545,33 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1272,12 +1537,33 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        necesarios = disponibles > inicio ? (disponibles - inicio) / enlace.zancada * enlace.zancada : 0;
      }
      if (!necesarios || direccion + inicio + necesarios > kMemoriaFisica) {
@@ -8973,7 +9778,7 @@ index e3fb6f1..6f73afb 100644
  
    cortar_etapa(0);
    // --- Textures and samplers (they may move on to the next work slot: before anything this draw records)
-@@ -1293,7 +1587,8 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1293,7 +1579,8 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    // and nothing about textures changed since (same work, same texture generation, every answer still valid, no
    // read of the cars' shadow texture, whose reads feed the shadow minimum's guard).
    bool texturas_reusadas = false;
@@ -8983,7 +9788,7 @@ index e3fb6f1..6f73afb 100644
        texturas_previas_.generacion == generacion_texturas_ && fotograma_ <= texturas_previas_.valido_hasta &&
        !texturas_previas_.toca_coches && texturas_previas_.dir_coches == dir_coches) {
      bool iguales = true;
-@@ -1325,15 +1620,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1325,15 +1612,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
          continue;
        }
        const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.registro) * 6;
@@ -9017,7 +9822,7 @@ index e3fb6f1..6f73afb 100644
          cache.ranura = ranura;
          cache.ancho = ancho;
          cache.alto = alto;
-@@ -1392,7 +1702,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1392,7 +1694,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        con_indices && !indices_almacen.gpu ? (indices_de_16 ? n_indices * 2 : n_indices * 4) : 0;
    const uint32_t bytes_vs = std::min<uint32_t>(p.vs->constantes_bytes, kRegistrosConstantes * 4);
    const uint32_t bytes_ps = ps ? std::min<uint32_t>(ps->constantes_bytes, kRegistrosConstantes * 4) : 0;
@@ -9026,7 +9831,7 @@ index e3fb6f1..6f73afb 100644
                                std::max(bytes_vs, kUboBytesVs) + std::max(bytes_ps, kUboBytesPs) + kUboBytesCompartidas;
    const uint32_t rebanada = nucleo_.config().mb_subida << 20;
    if (necesarios > rebanada) {
-@@ -1403,8 +1713,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1403,8 +1705,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    }
  
    // --- Render targets
@@ -9058,7 +9863,7 @@ index e3fb6f1..6f73afb 100644
        return false;
      }
    }
-@@ -1436,7 +1768,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1436,7 +1760,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    // The useful area of the bound targets: nothing is drawn below the scissor. If this draw reaches rows the last
    // clear of a target left as they were, they are cleared first (nfsmw_dk_borrar_area_util).
    {
@@ -9071,7 +9876,7 @@ index e3fb6f1..6f73afb 100644
      for (uint32_t i = 0, indice = 0; i < 4; ++i) {
        if (ImagenDk* imagen = imagenes_pase_[i]) {
          CompletarBanda(*imagen, hasta, true, indice++);
-@@ -1450,7 +1786,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1450,7 +1778,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    // --- Specialization and shared constants
    uint32_t especializacion = entrada->especializacion;
    static const bool inv_tamano = REXCVAR_GET(nfsmw_nativo_inv_tamano_tex);
@@ -9080,7 +9885,7 @@ index e3fb6f1..6f73afb 100644
    if (inv_tamano) {
      especializacion |= kSpecInvTamanoTex;
    }
-@@ -1501,16 +1837,57 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1501,16 +1829,57 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        ++dibujos_z_temprana_;
      }
    }
@@ -9147,7 +9952,7 @@ index e3fb6f1..6f73afb 100644
  
    // --- The deferred sky (nfsmw_nativo_cielo_aplazado; the Vulkan path's criteria, explained there). The dome is the
    // sky's pixel shader, opaque, testing depth without writing it, no stencil, 480 indices, the first draw of the
-@@ -1541,7 +1918,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1541,7 +1910,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        REXLOG_WARN("[deko3d] cielo: la guardia ve {} domos en el MISMO fotograma; no se aplaza nada en la sesion",
                    cielo_guardia_en_fotograma_);
      }
@@ -9156,7 +9961,7 @@ index e3fb6f1..6f73afb 100644
      es_cielo = aplazar_cielo && es_el_domo && cielo_guardia_ == kCieloAplazando;
    }
    if (cielo_pendiente_ && (es_cielo || !(opaco_en_todos && escribe_z_dibujo))) {
-@@ -1550,16 +1927,37 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1550,16 +1919,37 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    AntesDe3D();  // a transfer recorded since the pass began (a cubemap's faces) is finished first
  
    // --- Shaders
@@ -9199,7 +10004,7 @@ index e3fb6f1..6f73afb 100644
      g_.ps = fs;
    }
  
-@@ -1574,6 +1972,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1574,6 +1964,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      rs.frontFace = (modo_sc & 0x4) ? DkFrontFace_CW : DkFrontFace_CCW;
      rs.provokingVertex = DkProvokingVertex_First;  // the Vulkan path's
      rs.depthBiasEnableMask = con_sesgo ? DkPolygonFlag_All : 0;
@@ -9207,7 +10012,7 @@ index e3fb6f1..6f73afb 100644
      if (!g_.valido || !Iguales(rs, g_.raster)) {
        dkCmdBufBindRasterizerState(cmd, &rs);
        g_.raster = rs;
-@@ -1627,7 +2026,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1627,7 +2018,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      for (uint32_t i = 0; i < n_colores; ++i) {
        if ((cs.blendEnableMask >> i) & 0x1) {
          if (!g_.valido || !Iguales(mezclas[i], g_.mezclas[i])) {
@@ -9216,7 +10021,7 @@ index e3fb6f1..6f73afb 100644
            g_.mezclas[i] = mezclas[i];
          }
        }
-@@ -1685,6 +2084,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1685,6 +2076,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
        dkCmdBufSetBlendConst(cmd, mezcla_constante[0], mezcla_constante[1], mezcla_constante[2], mezcla_constante[3]);
        std::memcpy(g_.mezcla_constante, mezcla_constante, sizeof(mezcla_constante));
      }
@@ -9228,7 +10033,7 @@ index e3fb6f1..6f73afb 100644
      // No clamp, as Mesa programs it (HowToDeko3d.md, section 6, item 8); deko3d doubles the units like nvc0.
      if (con_sesgo && (!g_.valido || std::memcmp(sesgo, g_.sesgo, sizeof(sesgo)) != 0)) {
        dkCmdBufSetDepthBias(cmd, sesgo[0], 0.0f, sesgo[1]);
-@@ -1739,8 +2143,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1739,8 +2135,10 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    std::array<DkBufExtents, 16> bufers{};
    for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
      const Origen& origen = origenes[b];
@@ -9240,7 +10045,7 @@ index e3fb6f1..6f73afb 100644
        const deko::AlmacenGeometria::Resultado en_almacen = geometria_.Buscar(
            origen.datos, origen.bytes, uint64_t(origen.orden), origen.bytes, [&](uint8_t* destino, uint32_t&, uint32_t&) {
              CopiarVertices(TrabajoCopia{origen.datos, destino, origen.bytes / 4, origen.orden});
-@@ -1754,7 +2160,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1754,7 +2152,7 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      // The same guest range in the same order already copied in this work slot: bound again, not copied.
      const uint64_t direccion = uint64_t(reinterpret_cast<uintptr_t>(origen.datos));
      uint64_t ya = 0;
@@ -9249,7 +10054,7 @@ index e3fb6f1..6f73afb 100644
        bufers[b] = {DkGpuAddr(ya), origen.bytes};
        continue;
      }
-@@ -1762,8 +2168,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1762,8 +2160,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      if (!s) {
        return Rechazar(13, "sin sitio en el anillo de subida");
      }
@@ -9264,7 +10069,7 @@ index e3fb6f1..6f73afb 100644
      bufers[b] = {s.gpu, origen.bytes};
    }
    // One call per buffer. deko3d 0.5.0's dkCmdBufBindVtxBuffers reserves 5 words per buffer and writes 6: with n
-@@ -1773,6 +2183,63 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1773,6 +2175,63 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
    for (size_t b = 0; b < entrada->enlaces.size(); ++b) {
      dkCmdBufBindVtxBuffers(cmd, uint32_t(b), &bufers[b], 1);
    }
@@ -9328,21 +10133,80 @@ index e3fb6f1..6f73afb 100644
    cortar_etapa(3);
    DkGpuAddr dir_indices = 0;
    if (con_indices) {
-@@ -1797,9 +2264,11 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1797,70 +2256,8 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      dkCmdBufBindIdxBuffer(cmd, indices_de_16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint32, dir_indices);
    }
    cortar_etapa(4);
 -  static const bool por_diferencias = REXCVAR_GET(nfsmw_dk_constantes_por_diferencias);
-+  // The push-constant path is limited to small blocks on Switch; ReNut's shared block is 1360 bytes.
-+  const bool por_diferencias = REXCVAR_GET(nfsmw_dk_constantes_por_diferencias) && kUboBytesCompartidas <= 256 &&
-+                              p.vs->literais.empty() && (!ps || ps->literais.empty());
-   if (por_diferencias && !es_cielo) {
+-  if (por_diferencias && !es_cielo) {
 -    constexpr uint32_t kBloqueCompartidas = 512;  // dkCmdBufPushConstants wants the block size in 256-byte steps
-+    constexpr uint32_t kBloqueCompartidas = 1536;  // 1360-byte ReNut shared block, rounded to 256-byte steps
-     if (bloques_trabajo_ != trabajo_) {
-       // A new work: the blocks start as the registers are now (the GPU has not started this work: CPU writes).
-       const deko::Subida v = nucleo_.Reservar(kUboBytesVs, DK_UNIFORM_BUF_ALIGNMENT);
-@@ -1868,28 +2337,70 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+-    if (bloques_trabajo_ != trabajo_) {
+-      // A new work: the blocks start as the registers are now (the GPU has not started this work: CPU writes).
+-      const deko::Subida v = nucleo_.Reservar(kUboBytesVs, DK_UNIFORM_BUF_ALIGNMENT);
+-      const deko::Subida f = nucleo_.Reservar(kUboBytesPs, DK_UNIFORM_BUF_ALIGNMENT);
+-      const deko::Subida c = nucleo_.Reservar(kBloqueCompartidas, DK_UNIFORM_BUF_ALIGNMENT);
+-      if (!v || !f || !c) {
+-        return Rechazar(13, "sin sitio en el anillo de subida");
+-      }
+-      std::memcpy(v.cpu, r + kRegConstantesVs, kUboBytesVs);
+-      std::memcpy(sombra_vs_.data(), r + kRegConstantesVs, kUboBytesVs);
+-      std::memcpy(f.cpu, r + kRegConstantesPs, kUboBytesPs);
+-      std::memcpy(sombra_ps_.data(), r + kRegConstantesPs, kUboBytesPs);
+-      std::memcpy(c.cpu, compartidas, sizeof(compartidas));
+-      std::memcpy(sombra_compartidas_.data(), compartidas, sizeof(compartidas));
+-      bloque_vs_ = v.gpu;
+-      bloque_ps_ = f.gpu;
+-      bloque_compartidas_ = c.gpu;
+-      bloques_trabajo_ = trabajo_;
+-      bloque_vs_generacion_ = p.generacion_constantes_vs;
+-      bloque_ps_generacion_ = p.generacion_constantes_ps;
+-      bloque_vs_cubierto_ = kUboBytesVs;
+-      bloque_ps_cubierto_ = kUboBytesPs;
+-    } else {
+-      // What changed since what was pushed, within what this draw's shaders read.
+-      if (bloque_vs_generacion_ != p.generacion_constantes_vs) {
+-        bloque_vs_generacion_ = p.generacion_constantes_vs;
+-        bloque_vs_cubierto_ = 0;
+-      }
+-      if (bytes_vs > bloque_vs_cubierto_) {
+-        registros_empujados_ += EmpujarDiferencias(cmd, bloque_vs_, kUboBytesVs, r + kRegConstantesVs,
+-                                                   sombra_vs_.data(), bloque_vs_cubierto_, bytes_vs, empujes_);
+-        bloque_vs_cubierto_ = bytes_vs;
+-      }
+-      if (ps) {
+-        if (bloque_ps_generacion_ != p.generacion_constantes_ps) {
+-          bloque_ps_generacion_ = p.generacion_constantes_ps;
+-          bloque_ps_cubierto_ = 0;
+-        }
+-        if (bytes_ps > bloque_ps_cubierto_) {
+-          registros_empujados_ += EmpujarDiferencias(cmd, bloque_ps_, kUboBytesPs, r + kRegConstantesPs,
+-                                                     sombra_ps_.data(), bloque_ps_cubierto_, bytes_ps, empujes_);
+-          bloque_ps_cubierto_ = bytes_ps;
+-        }
+-      }
+-      registros_empujados_ += EmpujarDiferencias(cmd, bloque_compartidas_, kBloqueCompartidas, compartidas,
+-                                                 sombra_compartidas_.data(), 0, sizeof(compartidas), empujes_);
+-    }
+-    if (bloque_vs_ != g_.ubo[0]) {
+-      dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 0, bloque_vs_, kUboBytesVs);
+-      g_.ubo[0] = bloque_vs_;
+-    }
+-    if (ps && bloque_ps_ != g_.ubo[1]) {
+-      dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 1, bloque_ps_, kUboBytesPs);
+-      g_.ubo[1] = bloque_ps_;
+-    }
+-    if (bloque_compartidas_ != g_.ubo[2]) {
+-      dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 2, bloque_compartidas_, kBloqueCompartidas);
+-      dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 2, bloque_compartidas_, kBloqueCompartidas);
+-      g_.ubo[2] = bloque_compartidas_;
+-    }
+-  } else {
++  // 0.1.61: the constants-by-differences path (nfsmw_dk_constantes_por_diferencias) was removed: it was gated by
++  // kUboBytesCompartidas <= 256, false at compile time (85 * 16 = 1360), so it never ran.
+   // Only the registers each shader reads (EntradaShader::constantes_bytes); the copy is reused while their
+   // generation and the slot are the same and it covers what this shader needs. The deferred sky always gets its own
+   // copies (they stay as they are until it is replayed).
+@@ -1868,28 +2265,73 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      constantes_trabajo_ = trabajo_;
      constantes_vs_generacion_ = constantes_ps_generacion_ = UINT64_MAX;
    }
@@ -9392,6 +10256,7 @@ index e3fb6f1..6f73afb 100644
 +  // draw. When only those words differ and the block already bound at compartidas_gpu_ is this slot's, the new values
 +  // are pushed in order with the draws instead of reserving and copying the whole 1360 B block again.
 +  bool compartidas_empujadas = false;
++  bool compartidas_distintas = false;  // the push test already found other words changed: the copy below is due
 +  if (REXCVAR_GET(nfsmw_dk_compartidas_push) && !es_cielo && compartidas_gpu_ != 0 && compartidas_trabajo_ == trabajo_ &&
 +      g_.ubo[2] == compartidas_gpu_) {
 +    const uint32_t vmin_122 = compartidas[122];
@@ -9411,16 +10276,21 @@ index e3fb6f1..6f73afb 100644
 +        compartidas_previas_[263] = vmin_263;
 +      }
 +      compartidas_empujadas = true;
++    } else {
++      compartidas_distintas = true;  // words other than 122/263 differ, so the whole block differs too
 +    }
 +  }
 +  if (!compartidas_empujadas &&
-+      (compartidas_trabajo_ != trabajo_ || es_cielo ||
++      (compartidas_distintas || compartidas_trabajo_ != trabajo_ || es_cielo ||
 +       std::memcmp(compartidas, compartidas_previas_, sizeof(compartidas)) != 0)) {
      const deko::Subida s = nucleo_.Reservar(kUboBytesCompartidas, DK_UNIFORM_BUF_ALIGNMENT);
      if (!s) {
        return Rechazar(13, "sin sitio en el anillo de subida");
-@@ -1915,6 +2426,17 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1912,9 +2354,19 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+     dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 2, compartidas_gpu_, kUboBytesCompartidas);
+     g_.ubo[2] = compartidas_gpu_;
    }
+-  }
  
    // --- The draw
 +  if (ImagenDk* z = imagenes_pase_[4]) {
@@ -9437,7 +10307,7 @@ index e3fb6f1..6f73afb 100644
    if (es_cielo) {
      // Deferred: its state is what g_ holds now; its buffers stay in this slot's ring until the work is submitted, and
      // the work is not closed with it pending (CerrarTrabajo emits it).
-@@ -1987,6 +2509,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -1987,6 +2439,12 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
          }
          dkCmdBufReportCounter(cmd, DkCounter_Timestamp, marca_vez);
        }
@@ -9450,7 +10320,7 @@ index e3fb6f1..6f73afb 100644
        if (con_indices) {
          dkCmdBufDrawIndexed(cmd, primitiva, n_indices, 1, 0, -int32_t(vmin), 0);
        } else {
-@@ -2018,6 +2546,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
+@@ -2018,6 +2476,30 @@ bool RenderDk::Dibujar(const PeticionDibujo& p) {
      }
      ++dibujos_en_pase_;
    }
@@ -10443,7 +11313,7 @@ index 0000000..0d3e818
 +};
 +}
 diff --git a/src/x360/deko/texturas.cpp b/src/x360/deko/texturas.cpp
-index 8118904..7805ac1 100644
+index 8118904..8696447 100644
 --- a/src/x360/deko/texturas.cpp
 +++ b/src/x360/deko/texturas.cpp
 @@ -17,25 +17,40 @@
@@ -10626,7 +11496,7 @@ index 8118904..7805ac1 100644
    }
    EscribirDescriptorImagen(ranura, v);
    vistas_.emplace(clave, ranura);
-@@ -224,6 +329,127 @@ uint32_t RenderDk::VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint1
+@@ -224,6 +329,130 @@ uint32_t RenderDk::VistaDe(const ImagenDk& imagen, uint32_t swizzle_guest, uint1
    return ranura;
  }
  
@@ -10650,6 +11520,7 @@ index 8118904..7805ac1 100644
 +      DestruirImagen(c.imagen);
 +    }
 +    convertidas_signo_.clear();
++    ++generacion_texturas_;  // the per-fetch cache and the reused textures may name their descriptors
 +  }
 +  ConvertidaSigno& c = convertidas_signo_[(resuelta.serie << 8) | (signos & 0xFF)];
 +  if (!c.imagen.viva) {
@@ -10677,6 +11548,7 @@ index 8118904..7805ac1 100644
 +      DestruirImagen(c.imagen);
 +    }
 +    recortadas_.clear();
++    ++generacion_texturas_;  // the per-fetch cache and the reused textures may name their descriptors
 +  }
 +  ConvertidaSigno& c = recortadas_[(resuelta.serie << 28) | (uint64_t(ancho) << 14) | alto];
 +  if (!c.imagen.viva) {
@@ -10712,6 +11584,7 @@ index 8118904..7805ac1 100644
 +      DestruirImagen(a.imagen);
 +    }
 +    apiladas_.clear();
++    ++generacion_texturas_;  // the per-fetch cache and the reused textures may name their descriptors
 +  }
 +  ApiladaDk& a = apiladas_[(uint64_t(base) << 28) | (uint64_t(ancho) << 14) | alto];
 +  if (!a.imagen.viva) {
@@ -10754,7 +11627,7 @@ index 8118904..7805ac1 100644
  uint32_t RenderDk::VaciaDe(uint16_t tipo_shader) const {
    return TipoVolumen(tipo_shader) ? 1 : TipoCubo(tipo_shader) ? 2 : 0;
  }
-@@ -254,7 +480,7 @@ bool RenderDk::CrearVacias() {
+@@ -254,7 +483,7 @@ bool RenderDk::CrearVacias() {
    s.wrapMode[0] = s.wrapMode[1] = s.wrapMode[2] = DkWrapMode_ClampToEdge;
    DkSamplerDescriptor d;
    dkSamplerDescriptorInitialize(&d, &s);
@@ -10763,7 +11636,7 @@ index 8118904..7805ac1 100644
    siguiente_descriptor_ = kDescriptoresReservados;
    return true;
  }
-@@ -303,7 +529,7 @@ uint32_t RenderDk::SamplerDe(const uint32_t* f, bool puntual) {
+@@ -303,7 +532,7 @@ uint32_t RenderDk::SamplerDe(const uint32_t* f, bool puntual) {
    DkSamplerDescriptor d;
    dkSamplerDescriptorInitialize(&d, &s);
    AsegurarTrabajo();
@@ -10772,7 +11645,7 @@ index 8118904..7805ac1 100644
                     sizeof(d));
    samplers_.emplace(clave, ranura);
    return ranura;
-@@ -385,51 +611,138 @@ bool RenderDk::LeerVolumen(const uint32_t* f, const FormatoDk& tf, uint32_t bloq
+@@ -385,51 +614,138 @@ bool RenderDk::LeerVolumen(const uint32_t* f, const FormatoDk& tf, uint32_t bloq
  // ---- The texture of a fetch constant
  
  uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint32_t& ancho_out, uint32_t& alto_out,
@@ -10922,7 +11795,7 @@ index 8118904..7805ac1 100644
    // size_2d: 13 + 13 bits; size_3d: 11 + 11 + 10 bits (xenos.h).
    const uint32_t ancho = volumen ? (f[2] & 0x7FF) + 1 : (f[2] & 0x1FFF) + 1;
    const uint32_t alto = volumen ? ((f[2] >> 11) & 0x7FF) + 1 : ((f[2] >> 13) & 0x1FFF) + 1;
-@@ -447,7 +760,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -447,7 +763,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
    const uint64_t zancada_cara =
        (uint64_t((pitch_bloques + 31) & ~uint32_t(31)) * tf.bytes * ((bloques_y + 31) & ~uint32_t(31)) + 4095) &
        ~uint64_t(4095);
@@ -10931,7 +11804,7 @@ index 8118904..7805ac1 100644
    const uint64_t clave = XXH3_64bits(claves, sizeof(claves));
  
    // Mip levels with the rules of GetSubresourcesFromFetchConstant: no mip address, no mips; the maximum clamped to the
-@@ -455,7 +768,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -455,7 +771,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
    static const bool mipmaps = REXCVAR_GET(nfsmw_nativo_mipmaps);
    const bool mosaico = (f[0] >> 31) & 0x1;
    const uint64_t dir_base = uint64_t(base) & 0x1FFFFFFF;
@@ -10940,7 +11813,7 @@ index 8118904..7805ac1 100644
    const uint32_t nivel_empaquetado =
        mipmaps && !volumen && ((f[5] >> 11) & 0x1) ? NivelEmpaquetado(ancho, alto) : UINT32_MAX;
    uint32_t nivel_max = 0;
-@@ -527,11 +840,12 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -527,11 +843,12 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
        TexturaDk& cubo_resuelto = texturas_[clave ^ 0x9E3779B97F4A7C15ull];
        if (!cubo_resuelto.imagen.viva) {
          if (!CrearImagen(cubo_resuelto.imagen, DkImageType_Cubemap, DkImageFormat_RGBA8_Unorm, ancho, alto, 1, 1, 0,
@@ -10954,7 +11827,7 @@ index 8118904..7805ac1 100644
          cubo_resuelto.bytes = uint64_t(ancho) * alto * 4 * 6;
          bytes_texturas_ += cubo_resuelto.bytes;
          ++texturas_creadas_;
-@@ -556,8 +870,8 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -556,8 +873,8 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
            }
            DkImageView origen;
            dkImageViewDefaults(&origen, &caras[c]->imagen);
@@ -10965,7 +11838,7 @@ index 8118904..7805ac1 100644
            dkCmdBufCopyImage(nucleo_.comandos(), &origen, &a, &destino, &b, 0);
          }
          if (alguna) {
-@@ -573,6 +887,75 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -573,6 +890,75 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
      }
    }
  
@@ -11041,7 +11914,7 @@ index 8118904..7805ac1 100644
    TexturaDk& textura = texturas_[clave];
    if (!textura.imagen.viva) {
      // BC: the size in whole blocks, as the Vulkan backend (the shaders' 1/size is the host size).
-@@ -598,10 +981,11 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -598,10 +984,11 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
                    ((f[0] >> 22) & 0x1FF) << 5, swizzle, cubo ? " (cubo)" : volumen ? " (3D)" : "", niveles);
      }
    }
@@ -11055,7 +11928,7 @@ index 8118904..7805ac1 100644
      return ranura;
    };
    ancho_out = textura.imagen.ancho;
-@@ -609,7 +993,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -609,7 +996,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
    if (textura.fotograma == fotograma_) {
      return listo();  // already checked this frame
    }
@@ -11064,7 +11937,7 @@ index 8118904..7805ac1 100644
      return listo();
    }
    textura.fotograma = fotograma_;
-@@ -650,7 +1034,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -650,7 +1037,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
        // sample would read more than half of their bytes.
        const uint64_t bytes_completa = extension + extension_mips;
        const uint64_t bytes_de_muestra = BytesMuestra(extension) + BytesMuestra(extension_mips);
@@ -11073,7 +11946,7 @@ index 8118904..7805ac1 100644
                                 bytes_de_muestra * 2 <= bytes_completa &&
                                 (bases_sin_muestra_.empty() || !bases_sin_muestra_.count(uint32_t(base)));
        const bool muestra_util = con_muestra && textura.intervalo >= 8 && textura.muestra_valida;
-@@ -664,7 +1048,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -664,7 +1051,7 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
          fotograma_huellas_ = fotograma_;
          bytes_huella_fotograma_ = 0;
        }
@@ -11082,7 +11955,7 @@ index 8118904..7805ac1 100644
            textura.aplazamientos < kAplazamientoMax && bytes_huella_fotograma_ > 0 &&
            bytes_huella_fotograma_ + bytes_huella > presupuesto_huellas_) {
          ++textura.aplazamientos;
-@@ -752,30 +1136,18 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -752,30 +1139,18 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
      bytes_capa_nivel[n] = size_t(bx_host) * by_host * tf.bytes;
      bytes_datos += bytes_capa_nivel[n] * capas * (fondo ? fondo : 1);
    }
@@ -11120,7 +11993,7 @@ index 8118904..7805ac1 100644
        }
      }
      for (uint32_t n = 1; n < img.niveles; ++n) {
-@@ -794,26 +1166,150 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
+@@ -794,26 +1169,150 @@ uint32_t RenderDk::PrepararTextura(const uint32_t* f, uint16_t tipo_shader, uint
          fuera = !LeerNivel(dir_mips + regiones[s].desplazamiento + c * regiones[s].zancada, mosaico,
                             regiones[s].pitch_bloques, regiones[s].fila_bytes, tf, ox, oy, std::min(bx_invitado, bx_host),
                             std::min(by_invitado, by_host), bx_host,

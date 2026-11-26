@@ -17,6 +17,11 @@ REXCVAR_DECLARE(bool, b3_log_periodico);  // graphics.cpp
 REXCVAR_DEFINE_INT32(b3_velocidade_jogo, 1, "Budokai 3",
                      "Velocidade da luta: 1 = tempo real (delta time), 0 = original do jogo.");
 
+REXCVAR_DECLARE(int32_t, b3_tempo_jogo_fps);  // main.cpp
+REXCVAR_DEFINE_DOUBLE(b3_tempo_jogo_salto_max, 1.25, "Budokai 3",
+                      "Most game time one slow frame may catch up, as a multiple of the GAME TIME step (60/fps). Stops "
+                      "load hitches on the first use of a special from skipping its effects. 0 = old behaviour (up to 100 ms).");
+
 REXCVAR_DEFINE_BOOL(b3_tempo_jogo_mundo, true, "Budokai 3",
                     "GAME TIME (delta e teto de FPS) tambem no mapa do Dragon Universe (fase 8), com o mesmo valor escolhido para a luta.");
 
@@ -32,7 +37,6 @@ std::atomic<int> codeGuard{-1};  // -1 unchecked, 0 mismatch, 1 ok
 
 thread_local b3::timing::DeltaSample lastSample;
 thread_local int lastPhase = -1;
-thread_local uint64_t battleAdjusted = 0;
 thread_local b3::timing::SameFrameBattleDelta battleClock;
 thread_local bool battleActive = false;
 thread_local uint32_t activeManager = 0;
@@ -46,7 +50,10 @@ bool WorldNow() { return REXCVAR_GET(b3_tempo_jogo_mundo); }
 namespace b3 {
 bool GameSpeedAppliedThisFrame() { return appliedThisFrame.load(std::memory_order_relaxed); }
 int PublishedPhase() { return publishedPhase.load(std::memory_order_relaxed); }
-bool TimedScene(int phase) { return b3::timing::FrameDelta::Scene(phase, WorldNow()); }
+bool TimedScene(int phase) {
+  return b3::timing::FrameDelta::Scene(phase, WorldNow()) && EnabledNow() &&
+         codeGuard.load(std::memory_order_relaxed) == 1;
+}
 }  // namespace b3
 
 REX_HOOK_RAW(sub_82088F70) {
@@ -91,7 +98,19 @@ REX_HOOK_RAW(sub_82088F70) {
     return;
   }
   const float original = std::bit_cast<float>(read(b3::timing::FrameDelta::stepAddress));
-  const auto sample = local.clock.Sample(ns, phase, original, true, WorldNow());
+  // Catch-up limit: the GAME TIME step (60/fps) times b3_tempo_jogo_salto_max; 0 or less keeps the old 6 ticks.
+  const int fps = REXCVAR_GET(b3_tempo_jogo_fps);
+  const double factor = REXCVAR_GET(b3_tempo_jogo_salto_max);
+  const double maxTicks = factor > 0 && fps >= 30 && fps < 60 ? 60.0 / fps * factor : 6.0;
+  const auto sample = local.clock.Sample(ns, phase, original, true, WorldNow(), maxTicks);
+  if (sample.clamped) {
+    static thread_local uint32_t hitchLogs = 0;
+    if (hitchLogs < 40) {
+      ++hitchLogs;
+      REXLOG_INFO("[B3 velocidade] slow frame: fase={} dt_ms={:.1f} ticks limited to {:.3f}{}", phase,
+                  sample.seconds * 1000, sample.ticks, hitchLogs == 40 ? " (further ones not logged)" : "");
+    }
+  }
   lastSample = sample;
   lastPhase = phase;
   patch.Apply(sample, read, write);
@@ -126,7 +145,6 @@ REX_HOOK_RAW(sub_820FC260) {
   activeTicks = lastSample.ticks;
   battleClock.Begin(manager, activeTicks, read, write);
   battleActive = true;
-  ++battleAdjusted;
   try {
     DeltaBattle_sub_820FC260(ctx, base);
   } catch (...) {

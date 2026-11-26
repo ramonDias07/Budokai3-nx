@@ -222,6 +222,19 @@ bool BuildLayout(std::span<const uint8_t> head, uint64_t real_size, std::span<co
   layout.header.assign(head.begin(), head.begin() + ptrdiff_t(header_end));
   layout.segments.push_back({0, header_end, 0, 0, -1, 0, 0, Segment::kHeader});
   uint64_t cursor = header_end;
+  // An original span that continues the previous original span (contiguous in both the virtual and the real file)
+  // extends it, so one game read crosses many small entries with one real read.
+  const auto push_original = [&layout](uint64_t virtual_start, uint64_t length, uint64_t original_start) {
+    if (!layout.segments.empty()) {
+      Segment& prev = layout.segments.back();
+      if (prev.kind == Segment::kOriginal && prev.virtual_start + prev.length == virtual_start &&
+          prev.original_start + prev.length == original_start) {
+        prev.length += length;
+        return;
+      }
+    }
+    layout.segments.push_back({virtual_start, length, original_start, 0, -1, 0, 0, Segment::kOriginal});
+  };
   for (size_t k = 0; k < items.size(); ++k) {
     const Item& item = items[k];
     const uint64_t next = k + 1 < items.size() ? items[k + 1].offset : region_end;
@@ -229,7 +242,7 @@ bool BuildLayout(std::span<const uint8_t> head, uint64_t real_size, std::span<co
     uint8_t* toc = layout.header.data() + 8 + item.index * 8;
     if (item.replacement < 0) {
       Put32(toc, uint32_t(cursor));
-      if (span) layout.segments.push_back({cursor, span, item.offset, 0, -1, 0, 0, Segment::kOriginal});
+      if (span) push_original(cursor, span, item.offset);
       cursor += span;
       continue;
     }
@@ -249,7 +262,7 @@ bool BuildLayout(std::span<const uint8_t> head, uint64_t real_size, std::span<co
   // The tail (name table and anything after the data), shifted as a block.
   const uint64_t shift = cursor - region_end;
   if (real_size > region_end) {
-    layout.segments.push_back({cursor, real_size - region_end, region_end, 0, -1, 0, 0, Segment::kOriginal});
+    push_original(cursor, real_size - region_end, region_end);
   }
   layout.virtual_size = cursor + (real_size - region_end);
   if (layout.virtual_size > UINT32_MAX) {
@@ -279,23 +292,32 @@ bool VirtualReader::Translate(const Segment& segment, uint64_t offset, uint64_t 
   if (&segment != latched_segment_ || offset != latched_next_) {
     latched_segment_ = &segment;
     latched_on_ = enabled_();
+    // One cache lookup for the whole load of this entry; the payload cannot change or be evicted under us.
+    latched_payload_.reset();
+    if (latched_on_) latched_payload_ = translated_(segment.pack_entry);
   }
   latched_next_ = offset + length;
   return latched_on_;
 }
 
-void VirtualReader::ReadOriginal(uint64_t offset, uint8_t* dst, size_t length) {
+bool VirtualReader::ReadOriginal(uint64_t offset, uint8_t* dst, size_t length) {
   size_t done = 0;
   while (done < length) {
     const size_t n = original_(offset + done, dst + done, length - done);
+    if (n == SIZE_MAX) {
+      failed_ = true;
+      return false;
+    }
     if (n == 0) break;
     done += n;
   }
-  if (done < length) std::memset(dst + done, 0, length - done);  // never past the real end; only on read errors
+  if (done < length) std::memset(dst + done, 0, length - done);  // only past the real end, which the layout avoids
+  return true;
 }
 
 size_t VirtualReader::Read(uint64_t offset, uint8_t* dst, size_t length) {
   const Layout& layout = *layout_;
+  failed_ = false;
   if (offset >= layout.virtual_size || length == 0) return 0;
   length = size_t(std::min<uint64_t>(length, layout.virtual_size - offset));
   // The segment holding `offset`.
@@ -310,20 +332,26 @@ size_t VirtualReader::Read(uint64_t offset, uint8_t* dst, size_t length) {
     uint8_t* out = dst + done;
     switch (s.kind) {
       case Segment::kHeader: std::memcpy(out, layout.header.data() + inside, n); break;
-      case Segment::kOriginal: ReadOriginal(s.original_start + inside, out, n); break;
+      case Segment::kOriginal:
+        latched_payload_.reset();
+        if (!ReadOriginal(s.original_start + inside, out, n)) return done;
+        break;
       case Segment::kReplaced: {
         Payload payload;
         uint64_t valid = s.original_length;  // bytes of real data in the slot, zeros after
-        if (Translate(s, at, n) && (payload = translated_(s.pack_entry))) valid = payload->size();
+        if (Translate(s, at, n)) payload = latched_payload_;
+        if (payload) valid = payload->size();
         const size_t real = inside < valid ? size_t(std::min<uint64_t>(n, valid - inside)) : 0;
         if (real) {
           if (payload) {
             std::memcpy(out, payload->data() + inside, real);
-          } else {
-            ReadOriginal(s.original_start + inside, out, real);
+          } else if (!ReadOriginal(s.original_start + inside, out, real)) {
+            return done;
           }
         }
         if (real < n) std::memset(out + real, 0, n - real);
+        // The entry is finished: do not keep its payload alive past the load.
+        if (inside + n >= s.length) latched_payload_.reset();
         break;
       }
     }
@@ -402,7 +430,7 @@ bool Pack::Open(const std::filesystem::path& pack_path, const std::filesystem::p
     e.stored_size = Le32(p + 16);
     e.size = Le32(p + 20);
     e.crc32 = Le32(p + 24);
-    if (e.file_id >= file_count || e.codec > 1 || e.size == 0 || e.data_offset + e.stored_size > pack_size_ ||
+    if (e.file_id >= file_count || e.codec > 1 || e.size == 0 || e.data_offset > pack_size_ || e.stored_size > pack_size_ - e.data_offset ||
         (e.codec == 0 && e.stored_size != e.size)) {
       *error = Fmt("bad entry %u in the pack (file %u, AFS entry %u)", i, e.file_id, e.entry_index);
       return false;
@@ -630,7 +658,11 @@ class OverlayFile final : public rex::filesystem::File {
             layout,
             [this](uint64_t offset, uint8_t* dst, size_t n) -> size_t {
               size_t got = 0;
-              if (XFAILED(inner_->ReadSync(std::span<uint8_t>(dst, n), size_t(offset), &got))) return 0;
+              const X_STATUS status = inner_->ReadSync(std::span<uint8_t>(dst, n), size_t(offset), &got);
+              if (XFAILED(status)) {
+                read_status_ = status;
+                return SIZE_MAX;
+              }
               return got;
             },
             &ServeTranslated, [] { return g_enabled.load(std::memory_order_relaxed); }) {}
@@ -645,6 +677,15 @@ class OverlayFile final : public rex::filesystem::File {
       return X_STATUS_ACCESS_DENIED;
     }
     *out_bytes_read = reader_.Read(byte_offset, buffer.data(), buffer.size());
+    if (reader_.failed()) {
+      static std::atomic<bool> logged{false};
+      if (!logged.exchange(true)) {
+        REXLOG_WARN("[ptbr] read of the real file failed (status {:#x}) at offset {}: returning the error to the game "
+                    "(logged once)",
+                    uint32_t(read_status_), byte_offset);
+      }
+      return XFAILED(read_status_) ? read_status_ : X_STATUS_UNSUCCESSFUL;
+    }
     return X_STATUS_SUCCESS;
   }
   X_STATUS WriteSync(std::span<const uint8_t>, size_t, size_t* out_bytes_written) override {
@@ -655,6 +696,7 @@ class OverlayFile final : public rex::filesystem::File {
 
  private:
   rex::filesystem::File* inner_;
+  X_STATUS read_status_ = X_STATUS_SUCCESS;  // last failing status of inner_->ReadSync
   VirtualReader reader_;
 };
 

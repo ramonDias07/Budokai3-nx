@@ -57,13 +57,6 @@ struct Lector {
   }
 };
 
-void U32(std::vector<uint8_t>& d, uint32_t v) {
-  for (unsigned i = 0; i < 4; ++i) d.push_back(uint8_t(v >> (i * 8)));
-}
-void U64(std::vector<uint8_t>& d, uint64_t v) {
-  U32(d, uint32_t(v)); U32(d, uint32_t(v >> 32));
-}
-
 void Validar(Shader& s) {
   Exigir(s.original.size() >= 24 && s.original.size() <= kMaxOriginal,
          "Longitud del contenedor fuera de limites");
@@ -151,43 +144,4 @@ void BibliotecaShaders::Cargar(const std::filesystem::path& archivo) {
   Cargar(datos);
 }
 
-const Shader* BibliotecaShaders::Buscar(std::span<const uint8_t> original) const {
-  if (original.size() < 24 || original.size() > kMaxOriginal) return nullptr;
-  const uint64_t huella = XXH3_64bits(original.data(), original.size());
-  auto it = std::lower_bound(shaders_.begin(), shaders_.end(), huella,
-      [](const Shader& s, uint64_t h) { return s.huella < h; });
-  // A hash collision can never pick another shader: the bytes are compared.
-  for (; it != shaders_.end() && it->huella == huella; ++it)
-    if (it->original.size() == original.size() &&
-        std::equal(original.begin(), original.end(), it->original.begin())) return &*it;
-  return nullptr;
-}
-
-std::vector<uint8_t> EmpaquetarShaders(std::vector<Shader> shaders) {
-  Exigir(!shaders.empty() && shaders.size() <= kMaxShaders, "Cantidad de shaders fuera de limites");
-  for (auto& s : shaders) Validar(s);
-  std::sort(shaders.begin(), shaders.end(), Menor);
-  std::vector<uint8_t> cuerpo;
-  uint32_t cantidad = 0;
-  const Shader* anterior = nullptr;
-  for (const auto& s : shaders) {
-    if (anterior && anterior->original == s.original) {
-      Exigir(anterior->spirv == s.spirv, "Un contenedor tiene dos traducciones distintas");
-      continue;
-    }
-    const size_t n = 16 + s.original.size() + s.spirv.size() * 4;
-    Exigir(n <= kMaxArchivo - 24 - cuerpo.size(), "Paquete demasiado grande");
-    U32(cuerpo, uint32_t(s.original.size())); U32(cuerpo, uint32_t(s.spirv.size()));
-    U64(cuerpo, s.huella);
-    cuerpo.insert(cuerpo.end(), s.original.begin(), s.original.end());
-    for (uint32_t palabra : s.spirv) U32(cuerpo, palabra);
-    ++cantidad;
-    anterior = &s;
-  }
-  std::vector<uint8_t> archivo(kFirma.begin(), kFirma.end());
-  U32(archivo, 1); U32(archivo, cantidad);
-  U64(archivo, XXH3_64bits(cuerpo.data(), cuerpo.size()));
-  archivo.insert(archivo.end(), cuerpo.begin(), cuerpo.end());
-  return archivo;
-}
 }  // namespace nfsmw::native

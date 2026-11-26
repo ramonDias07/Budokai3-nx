@@ -39,14 +39,9 @@ REXCVAR_DECLARE(bool, switch_atajo_perfil_app);
 REXCVAR_DECLARE(bool, switch_contador_fps);
 REXCVAR_DECLARE(int32_t, b3_velocidade_jogo);
 REXCVAR_DECLARE(int32_t, b3_limite_fps_luta);
-REXCVAR_DECLARE(bool, b3_gpu_boost_ram1600);
-REXCVAR_DECLARE(int32_t, b3_deko_resolucao_interna);
-REXCVAR_DECLARE(int32_t, b3_deko_resolucao_saida);
 REXCVAR_DECLARE(int32_t, b3_deko_ampliador);
-REXCVAR_DECLARE(int32_t, audio_switch_tramas_en_cola);
-REXCVAR_DECLARE(bool, audio_switch_ocultar_faltas);
 REXCVAR_DEFINE_BOOL(b3_deko_musica_independente, true, "Budokai 3",
-                    "Musica em tempo real. Desligue para comparar com a mistura da 0.1.32. Requer reiniciar.");
+                    "Real-time music, mixed on its own track. Off uses the older mix (kept for comparison). Requires a restart.");
 REXCVAR_DEFINE_INT32(b3_audio_atraso_ms, 0, "Budokai 3", "Atraso da mistura de efeitos em milissegundos.");
 
 REXCVAR_DEFINE_INT32(b3_tempo_jogo_fps, 45, "Budokai 3",
@@ -167,7 +162,7 @@ struct ProfileDef {
   const char* factory[kKeyCount];
 };
 
-//                                   tempo   interna saida   sombras  desfoque bloom    dof    boost    copias  z
+//                                   tempo   interna saida   sombras  desfoque bloom    dof    boost    copias  z       ram
 constexpr ProfileDef kProfiles[] = {
     {"default", "DEFAULT", "b3_perfil_default",
      "BALANCED LOOK AND SPEED: 45 FPS, FIGHTER SHADOWS ON, NO BLOOM, 720P, GPU BOOST IN HANDHELD",
@@ -749,8 +744,9 @@ constexpr AdvancedOption kControlOptions[] = {
      kRumble},
 };
 constexpr AdvancedOption kLogOptions[] = {
+    {"LOG TO FILE", "log_to_file",
+     "WRITES THE LOG TO FILES ON THE SD CARD (LOGS FOLDER). TURN ON FOR BUG REPORTS. NEEDS A RESTART.", kBoolean, true},
     {"LOG LEVEL", "log_level", "HOW MUCH THE LOG FILE RECORDS. INFO IS BEST FOR BUG REPORTS.", kLogLevel},
-    {"LOG TO FILE", "log_to_file", "WRITES THE LOG TO A FILE ON THE SD CARD. USEFUL FOR BUG REPORTS.", kBoolean, true},
     {"L3 + R3 CAPTURE", "b3_deko_diagnostico",
      "PRESS BOTH STICKS TO CAPTURE A FRAME AND ITS DATA FOR DIAGNOSIS.", kBoolean, true},
     {"FULL CAPTURE", "b3_deko_diagnostico_completo", "ADDS MORE DATA TO FRAME CAPTURES. LARGER FILES."},

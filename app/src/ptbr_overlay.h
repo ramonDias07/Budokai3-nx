@@ -81,7 +81,8 @@ using Payload = std::shared_ptr<const std::vector<uint8_t>>;
 // serializes reads per handle).
 class VirtualReader {
  public:
-  // original(offset, dst, n) returns the bytes read from the real file (short only at its end).
+  // original(offset, dst, n) returns the bytes read from the real file (short only at its end), or SIZE_MAX if the
+  // read failed (then Read stops early and failed() is true).
   // translated(pack_entry) returns the decompressed payload or nullptr (then the original bytes are served).
   // enabled() is the global toggle.
   VirtualReader(const Layout* layout, std::function<size_t(uint64_t, uint8_t*, size_t)> original,
@@ -92,11 +93,15 @@ class VirtualReader {
   // Returns the bytes copied (0 at or past the virtual end of file).
   size_t Read(uint64_t offset, uint8_t* dst, size_t length);
 
+  // True if the last Read stopped early because the real file could not be read; Read returned the bytes done.
+  bool failed() const { return failed_; }
+
  private:
   // A replaced entry read in several calls (the game reads big entries 256 sectors at a time) keeps the state it
   // started with, so a toggle in the middle cannot mix original and translated bytes in one load.
   bool Translate(const Segment& segment, uint64_t offset, uint64_t length);
-  void ReadOriginal(uint64_t offset, uint8_t* dst, size_t length);
+  // Returns false if the real file failed to read (failed_ is set).
+  bool ReadOriginal(uint64_t offset, uint8_t* dst, size_t length);
 
   const Layout* layout_;
   std::function<size_t(uint64_t, uint8_t*, size_t)> original_;
@@ -105,6 +110,8 @@ class VirtualReader {
   const Segment* latched_segment_ = nullptr;
   uint64_t latched_next_ = 0;
   bool latched_on_ = false;
+  Payload latched_payload_;  // held for the whole load of one entry: one cache lookup per entry, not per chunk
+  bool failed_ = false;
 };
 
 // ---- Pack ------------------------------------------------------------------------------------------------------

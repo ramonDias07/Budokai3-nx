@@ -83,6 +83,9 @@ REXCVAR_DEFINE_BOOL(b3_gpu_boost_ram1600, true, "Budokai 3",
 
 REXCVAR_DEFINE_BOOL(b3_deko_copia_final, true, "Budokai 3",
                     "Usa a imagem anterior ao FXAA na copia final do Budokai 3.");
+REXCVAR_DEFINE_BOOL(b3_registros_em_bloco, true, "Budokai 3",
+                    "Write shader and fetch constant registers in blocks instead of one word at a time (less CPU on the GPU thread). "
+                    "false = per-word path, for A/B comparison.");
 REXCVAR_DEFINE_BOOL(b3_log_periodico, false, "Budokai 3",
                     "Periodic performance logs (swap stats every 300 swaps, [B3 Deko desempenho], game speed, [io] summary, "
                     "SDK reports). Off: swap stats only at swap 1 and every 1800 swaps.");
@@ -194,10 +197,8 @@ class BattleFramePacer {
   void Pace() {
     const int phase = PublishedPhase();
     const int requested = REXCVAR_GET(b3_limite_fps_luta);
-    const int limit = TimedScene(phase) &&
-                              (requested == 30 || requested == 35 || requested == 40 || requested == 45 || requested == 50 || requested == 55)
-                          ? requested
-                          : 60;
+    const bool valid = requested == 30 || requested == 35 || requested == 40 || requested == 45 || requested == 50 || requested == 55;
+    const int limit = valid && TimedScene(phase) ? requested : 60;
     if (limit != limit_) {
       REXLOG_INFO("[B3 limite fps] efetivo={} (fase={} pedido={})", limit, phase, requested);
       limit_ = limit;
@@ -239,9 +240,6 @@ constexpr uint64_t kShadowProjectPixel = 0x4228617C65DB9D17ULL;
 constexpr uint64_t kStagePreviewPixel = 0x046E7D32000FC3F3ULL;
 constexpr uint64_t kHudVertex = 0xF37B3AC56DA38C91ULL;
 constexpr uint64_t kHudPixel = 0x1BFD0840B053E193ULL;
-// Build 0.1.53: the main menu UI sprites use the same pair as the combat HUD.
-constexpr uint64_t kMenuUiVertex = 0xF37B3AC56DA38C91ULL;
-constexpr uint64_t kMenuUiPixel = 0x1BFD0840B053E193ULL;
 constexpr uint64_t kSkinnedOutlineVertex = 0x9B2CDBD500DB8645ULL;
 constexpr uint64_t kSkinnedMaterialVertex = 0xF3AC1AA2FE3EA253ULL;
 constexpr uint64_t kFriezaSkinnedVertex = 0x2DD4268D7EE12280ULL;
@@ -354,10 +352,9 @@ class DekoCommandProcessor final : public CommandProcessor {
     // while a port menu is open. Lock-free; the state stays until the next swap.
     rex::ui::MostrarCalcomania(menu_hint_seen_ && !g_port_menu_open.load(std::memory_order_relaxed) &&
                                    REXCVAR_GET(b3_menu_legend),
-                               menu_hint_alpha_);
+                               1.0f);
     if (menu_hint_seen_) PlaceMenuLegend();
     menu_hint_seen_ = false;
-    menu_hint_alpha_ = 1.0f;
     // Probe (once per session): if the hint was never matched after ~5 s in phase 5 (main menu), log every draw of
     // the next swap, so the detector can be fixed from the console log.
     if (menu_hint_logs_ == 0 && !hint_probe_done_ && PublishedPhase() == 5 && ++phase5_swaps_ == 300) {
@@ -390,7 +387,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     unknown_ps_draws_ += frame_.unknown_ps;
     copy_attempts_ += frame_.copies;
     failed_copies_ += frame_.failed_copies;
-    previous_combat_frame_ = frame_.combat_post;
+    LogDialogueFrame();
     frame_ = {};
     bloom_blur_draw_ = false;
     shadow_resolve_ = 0;
@@ -436,7 +433,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     }
     render_ = std::make_unique<x360::RenderDk>(*provider, memory_);
     diagnostic_ = REXCVAR_GET(b3_deko_diagnostico);
-    REXLOG_INFO("[B3 Deko build] 0.1.56: performance pass (periodic logs off, shader lookup, shared UBO push, direct texture upload, capture block freed); effect capture on basic L3+R3");
+    REXLOG_INFO("[B3 Deko build] 0.1.62: log_to_file switch (no files written when off); 0.1.61 code review pass");
     direct_composite_ = REXCVAR_GET(b3_deko_copia_final);
     REXLOG_INFO("Xenos/Deko: copia final sem FXAA {}", direct_composite_ ? "ativada" : "desativada");
     if (diagnostic_) {
@@ -499,10 +496,46 @@ class DekoCommandProcessor final : public CommandProcessor {
     CommandProcessor::WriteRegister(index, value);
   }
 
+  // Block register writes (0.1.61): constants (0x4000-0x47FF) and fetch constants (0x4800-0x48BF) are plain stores in
+  // the base WriteRegister, so a whole run is byte-swapped and stored here, bumping each generation counter once if a
+  // value in its range changed. Any other range keeps the per-word path (scratch, COHER, gamma LUT side effects).
+  void WriteRegistersFromMem(uint32_t start_index, uint32_t* base, uint32_t num_registers) override {
+    constexpr uint32_t kFirst = 0x4000, kEnd = 0x48C0;
+    if (!block_register_writes_ || num_registers == 0 || start_index < kFirst ||
+        start_index >= kEnd || num_registers > kEnd - start_index) {
+      CommandProcessor::WriteRegistersFromMem(start_index, base, num_registers);
+      return;
+    }
+    uint32_t* values = register_file_->values;
+    bool vs_changed = false, ps_changed = false, fetch_changed = false;
+    for (uint32_t i = 0; i < num_registers; ++i) {
+      const uint32_t index = start_index + i;
+      const uint32_t value = rex::memory::load_and_swap<uint32_t>(base + i);
+      if (values[index] == value) continue;
+      values[index] = value;
+      if (index < 0x4400) {
+        vs_changed = true;
+      } else if (index < 0x4800) {
+        ps_changed = true;
+      } else {
+        fetch_changed = true;
+      }
+    }
+    if (vs_changed) ++vs_constants_;
+    if (ps_changed) ++ps_constants_;
+    if (fetch_changed) ++fetch_;
+  }
+
   Shader* LoadShader(xenos::ShaderType stage, uint32_t guest_address, const uint32_t* words,
                      uint32_t count) override {
     if (!count) return nullptr;
     const size_t bytes = size_t(count) * sizeof(uint32_t);
+    // Build 0.1.61: direct-mapped cache in front of the hash; correctness is still decided by the memcmp.
+    ShaderCacheEntry& cached = shader_cache_[((guest_address >> 2) ^ uint32_t(stage)) % shader_cache_.size()];
+    if (cached.slot && cached.guest_address == guest_address && cached.stage == stage && cached.count == count &&
+        std::memcmp(cached.slot->raw.data(), words, bytes) == 0) {
+      return cached.slot->shader.get();
+    }
     // Build 0.1.56: hashed lookup, no per-call std::string of the microcode. A hit is confirmed by stage, word count
     // and memcmp against the raw words kept in the slot (Shader::ucode_data() is byte-swapped, so it is not compared).
     const uint64_t content_hash = XXH3_64bits(words, bytes);
@@ -511,6 +544,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     for (const auto& slot : bucket) {
       if (slot->stage == stage && slot->raw.size() == count &&
           std::memcmp(slot->raw.data(), words, bytes) == 0) {
+        cached = {guest_address, stage, count, slot.get()};
         return slot->shader.get();
       }
     }
@@ -540,6 +574,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     slot->raw.assign(words, words + count);
     slot->shader = std::move(shader);
     DekoShader* result = slot->shader.get();
+    cached = {guest_address, stage, count, slot.get()};
     bucket.push_back(std::move(slot));
     return result;
   }
@@ -718,7 +753,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     draw.omitir_cor = skip_shadow;
     {
       // Shadow projection (Z LEQUAL + stencil EQUAL 1 over the restored depth): pull it towards the camera.
-      const int sesgo = std::clamp(REXCVAR_GET(b3_deko_sombra_sesgo), 0, 4096);
+      const int sesgo = shadow_bias_;
       const bool projecao = sesgo && vs_hash == kShadowProjectVertex && ps_hash == kShadowProjectPixel &&
                             (depth_control & 2u);
       draw.sesgo_b3[0] = projecao ? -float(sesgo) : 0.0f;
@@ -777,6 +812,25 @@ class DekoCommandProcessor final : public CommandProcessor {
         depth_alias == 0x530 && (depth_control == 0x00708736 || depth_control == 0x00708772) &&
         (frame_.copies == 2 || frame_.copies == 4) && primitive == xenos::PrimitiveType::kTriangleList &&
         dialogue_sprites_captured_ < 6;
+    // 0.1.60 recorder (always on): the comic dialogue draws portrait sprites, then a 1280x720 backdrop sampling a
+    // resolved texture that is resolved again later in the frame. Counted here, logged once per swap.
+    if (!frame_.combat_post && draw.vs && draw.ps && vs_hash == kHudVertex && ps_hash == kHudPixel &&
+        surface_width == 1280 && color_info == 0 && depth_alias == 0x530 && depth_control == 0x00708736 &&
+        primitive == xenos::PrimitiveType::kTriangleList && fetch0.type == xenos::FetchConstantType::kTexture) {
+      if (count == 6 && (fetch0.dword_2 & 0x03FFFFFFu) == 0x0059E4FFu) {
+        if (!dialogue_.backdrop_draw) {
+          dialogue_.backdrop_draw = frame_.draws;
+          dialogue_.backdrop_base = dialogue_base_ = fetch0.dword_1 & 0x1FFFF000u;
+          dialogue_.sprites_before = dialogue_.sprites;
+          if (dialogue_lines_ < kDialogueLineCap &&
+              (dialogue_frames_ < 90 || dialogue_frames_ % 60 == 0 || !dialogue_had_backdrop_)) {
+            dialogue_.texture_before = render_->DescribirResuelta(dialogue_.backdrop_base);
+          }
+        }
+      } else {
+        ++dialogue_.sprites;
+      }
+    }
     if (dialogue_sprite) {
       if (dialogue_sprites_captured_++ == 0) render_->VolcarCena(color_info, surface_width, frame_.draws, false);
       SaveDrawInputs(*vs, *ps, count, false, false);
@@ -807,7 +861,7 @@ class DekoCommandProcessor final : public CommandProcessor {
     // bottom-right area. The tint word has no verified alpha, so the legend alpha stays 1.0.
     // Build 0.1.56: only in the main-menu phase (5), and no more testing in this swap once the hint matched.
     if (!menu_hint_seen_ && PublishedPhase() == 5 && !frame_.combat_post && draw.vs && draw.ps &&
-        ((vs_hash == kHudVertex && ps_hash == kHudPixel) || (vs_hash == kMenuUiVertex && ps_hash == kMenuUiPixel)) &&
+        vs_hash == kHudVertex && ps_hash == kHudPixel &&
         surface_width == 1280 && color_info == 0 && primitive == xenos::PrimitiveType::kTriangleList &&
         (count == 6 || count == 12) && fetch0.type == xenos::FetchConstantType::kTexture) {
       MenuHintVertices hint_vertices;
@@ -902,12 +956,7 @@ class DekoCommandProcessor final : public CommandProcessor {
         (++effect_diag_lines_, true);
     const char* effect_probe = "no";
     if (effect_diag && effect_probes_ < 30) {
-      if (!vs->vertex_probe_checked) {
-        rex::string::StringBuffer disassembly;
-        vs->AnalyzeUcode(disassembly);
-        vs->vertex_probe_supported = ShaderInterpreter::CanInterpretShader(*vs);
-        vs->vertex_probe_checked = true;
-      }
+      EnsureVertexProbe(vs);
       if (vs->vertex_probe_supported) {
         ++effect_probes_;
         draw.diagnostico_dibujo = frame_.draws;
@@ -917,12 +966,7 @@ class DekoCommandProcessor final : public CommandProcessor {
       }
     }
     if (full_capture && vs && draw.vs && (hud_capture || model_capture)) {
-      if (!vs->vertex_probe_checked) {
-        rex::string::StringBuffer disassembly;
-        vs->AnalyzeUcode(disassembly);
-        vs->vertex_probe_supported = ShaderInterpreter::CanInterpretShader(*vs);
-        vs->vertex_probe_checked = true;
-      }
+      EnsureVertexProbe(vs);
       if (vs->vertex_probe_supported) {
         const uint32_t stream = hud_capture ? 0 : r.GetVertexFetch(95).dword_0;
         const std::array<uint64_t, 5> key{vs_hash, ps_hash, stream, surface_width, depth_control};
@@ -1045,7 +1089,7 @@ class DekoCommandProcessor final : public CommandProcessor {
       }
     }
     last_post_pass_.reset();
-    if (accepted && full_screen_strip && (r[XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFFu) == 1280u) {
+    if (accepted && full_screen_strip && (r[XE_GPU_REG_RB_SURFACE_INFO] & 0x3FFFFu) == 1280u) {
       if (ps_hash == kBlurPixel) {
         frame_.combat_post = true;
         last_post_pass_ = PostCapture::Desfoque;
@@ -1131,6 +1175,10 @@ class DekoCommandProcessor final : public CommandProcessor {
       }
     }
     ++frame_.copies;
+    if (dialogue_base_ && (copy.rb_copy_dest_base & 0x1FFFF000u) == dialogue_base_) {
+      ++dialogue_.copies_to_base;
+      dialogue_.copy_after = frame_.draws;
+    }
     bool substituted = false;
     const bool success = composite_source_ ? render_->CopiarDesdeResuelta(copy, composite_source_, substituted)
                                            : render_->Copiar(copy);
@@ -1196,6 +1244,14 @@ class DekoCommandProcessor final : public CommandProcessor {
   bool gpu_boost_estado_ = false;
   bool gpu_boost_ram_aplicada_ = false;
 
+  static void EnsureVertexProbe(DekoShader* vs) {
+    if (vs->vertex_probe_checked) return;
+    rex::string::StringBuffer disassembly;
+    vs->AnalyzeUcode(disassembly);
+    vs->vertex_probe_supported = ShaderInterpreter::CanInterpretShader(*vs);
+    vs->vertex_probe_checked = true;
+  }
+
   void UpdateOptions() {
     const uint32_t options = options_.load(std::memory_order_relaxed);
     const bool reduzir = (options & kReduzirCopias) != 0;
@@ -1215,10 +1271,13 @@ class DekoCommandProcessor final : public CommandProcessor {
     desfoque_leve_ = desfoque;
     sombras_projetadas_ = sombras;
     dof_height_ = height;
+    block_register_writes_ = REXCVAR_GET(b3_registros_em_bloco);
+    shadow_bias_ = std::clamp(REXCVAR_GET(b3_deko_sombra_sesgo), 0, 4096);
+    xbox_layout_ = REXCVAR_QUERY(bool, input_xbox_layout);
   }
 
   bool ReadDragonRushIcon(DragonRushIconVertices& vertices) {
-    return ReadHudVertices(vertices) && RepositionDragonRushIcon(vertices) && !REXCVAR_QUERY(bool, input_xbox_layout);
+    return ReadHudVertices(vertices) && RepositionDragonRushIcon(vertices) && !xbox_layout_;
   }
 
   // The 6 vertices (36 words: x, y, z, tint, u, v) of the current HUD sprite draw, from vertex fetch 95.
@@ -1331,6 +1390,8 @@ class DekoCommandProcessor final : public CommandProcessor {
 
   bool ManualCaptureRequested() {
     if (!capture_pad_ready_) return false;
+    // Polling every 4th swap is enough for a held chord (and keeps padUpdate off most swaps).
+    if ((swaps_ & 3u) != 0) return false;
     padUpdate(&capture_pad_);
     const uint64_t buttons = padGetButtons(&capture_pad_);
     const bool held = (buttons & kCaptureButtons) == kCaptureButtons;
@@ -1482,6 +1543,43 @@ class DekoCommandProcessor final : public CommandProcessor {
     if (!accepted) ++pass->failed;
   }
 
+  // 0.1.60: comic dialogue recorder. Logs every swap of the first 90 of a dialogue, every 60th after that, and every
+  // swap where the backdrop appears or disappears or its texture is resolved without a backdrop (how a new portrait
+  // reaches it). At most kDialogueLineCap lines per session.
+  void LogDialogueFrame() {
+    const DialogueFrame d = std::move(dialogue_);
+    dialogue_ = {};
+    const bool backdrop = d.backdrop_draw != 0;
+    // Map HUD sprites alone (d.sprites) do not keep an episode alive: they are drawn all the time on the map.
+    const bool active = backdrop || d.copies_to_base;
+    if (!active) {
+      if (dialogue_frames_ && ++dialogue_quiet_ > 120) {
+        if (dialogue_lines_ < kDialogueLineCap) {
+          ++dialogue_lines_;
+          REXLOG_INFO("[B3 dialogue] swap={} episode end after {} swaps", swaps_, dialogue_frames_);
+        }
+        dialogue_frames_ = 0;
+        dialogue_had_backdrop_ = false;
+        dialogue_base_ = 0;
+      }
+      return;
+    }
+    dialogue_quiet_ = 0;
+    if (!backdrop && !dialogue_frames_) return;  // sprites alone (map HUD): nothing until a backdrop shows up
+    if (d.backdrop_base) dialogue_base_ = d.backdrop_base;
+    const bool change = backdrop != dialogue_had_backdrop_ || (!backdrop && d.copies_to_base);
+    const uint32_t n = dialogue_frames_++;
+    dialogue_had_backdrop_ = backdrop;
+    if (dialogue_lines_ >= kDialogueLineCap || !(n < 90 || n % 60 == 0 || change)) return;
+    ++dialogue_lines_;
+    REXLOG_INFO("[B3 dialogue] swap={} phase={} n={} sprites={} backdrop_draw={} base={:08X} sprites_before={} "
+                "resolved_to_base={}x after_draw={} | tex at backdrop: {} | after frame: {}{}",
+                swaps_, PublishedPhase(), n, d.sprites, d.backdrop_draw, dialogue_base_, d.sprites_before,
+                d.copies_to_base, d.copy_after, backdrop ? d.texture_before : std::string("-"),
+                dialogue_base_ ? render_->DescribirResuelta(dialogue_base_) : std::string("-"),
+                dialogue_lines_ == kDialogueLineCap ? " (further lines not logged)" : "");
+  }
+
   void LogPasses() const {
     REXLOG_INFO("[B3 Deko cena] swap={} passes={} copies={}/{} draws_3d={} unknown_vs_3d={} overflow={}",
                 swaps_, draw_passes_.size(), copy_passes_.size(), frame_.copies, frame_.draws_3d,
@@ -1622,7 +1720,6 @@ class DekoCommandProcessor final : public CommandProcessor {
   bool legend_placed_ = false, legend_pt_ = false;
   float legend_right_ = 0, legend_top_ = 0;
   uint64_t legend_replace_at_ = 0;
-  float menu_hint_alpha_ = 1.0f;
   uint32_t menu_hint_logs_ = 0;
   uint32_t phase5_swaps_ = 0;
   uint64_t hint_probe_swap_ = 0;
@@ -1631,7 +1728,6 @@ class DekoCommandProcessor final : public CommandProcessor {
   bool reported_map_distortion_ = false, reported_switch_rush_ = false;
   uint64_t dof_leve_pedidos_ = 0, sombras_omitidas_ = 0, sombras_com_sesgo_ = 0;
   bool model_redraw_ = false, model_checkpoint_ = false;
-  bool previous_combat_frame_ = false;
   uint32_t shadow_resolve_ = 0, hud_traces_ = 0, effect_traces_ = 0;
   std::array<uint32_t, RegisterFile::kRegisterCount> postprocess_registers_;
   std::optional<x360::PeticionDibujo> composite_draw_;
@@ -1643,6 +1739,13 @@ class DekoCommandProcessor final : public CommandProcessor {
     std::unique_ptr<DekoShader> shader;
   };
   std::unordered_map<uint64_t, std::vector<std::unique_ptr<ShaderSlot>>> shaders_;
+  struct ShaderCacheEntry {
+    uint32_t guest_address = 0;
+    xenos::ShaderType stage = xenos::ShaderType::kVertex;
+    uint32_t count = 0;
+    ShaderSlot* slot = nullptr;
+  };
+  std::array<ShaderCacheEntry, 64> shader_cache_{};
   std::unique_ptr<x360::RenderDk> render_;
   const DekoShader* last_vs_ = nullptr;
   uint64_t vs_generation_ = 1;
@@ -1670,6 +1773,14 @@ class DekoCommandProcessor final : public CommandProcessor {
   uint32_t scene_checkpoints_ = 0;
   uint32_t captured_effects_ = 0;
   uint32_t dialogue_sprites_captured_ = 0;
+  struct DialogueFrame {
+    uint32_t sprites = 0, sprites_before = 0, backdrop_draw = 0, backdrop_base = 0, copies_to_base = 0, copy_after = 0;
+    std::string texture_before;
+  };
+  static constexpr uint32_t kDialogueLineCap = 1500;
+  DialogueFrame dialogue_;
+  uint32_t dialogue_base_ = 0, dialogue_frames_ = 0, dialogue_quiet_ = 0, dialogue_lines_ = 0;
+  bool dialogue_had_backdrop_ = false;
   std::array<uint8_t, 7> captured_inputs_{};
   std::map<std::array<uint64_t, 5>, uint32_t> probes_per_pass_;
   uint64_t state_capture_until_ = 0;
@@ -1681,6 +1792,9 @@ class DekoCommandProcessor final : public CommandProcessor {
   bool capture_pad_ready_ = false, capture_buttons_held_ = false;
   bool capture_rush_audio_ = false;
   bool diagnostic_ = false;
+  bool block_register_writes_ = true;
+  bool xbox_layout_ = false;
+  int shadow_bias_ = 64;
   bool gamma_dirty_ = true;
 };
 

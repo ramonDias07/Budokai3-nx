@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
-project(Budokai3NX VERSION 0.1.46 LANGUAGES C CXX)
+# Default for a fresh configure only; an already configured build dir keeps its own CMAKE_BUILD_TYPE.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+project(Budokai3NX VERSION 0.1.62 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

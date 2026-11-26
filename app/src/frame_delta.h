@@ -27,7 +27,9 @@ public:
     static constexpr bool Scene(int phase,bool world) {
         return BattleScene(phase)||(world&&WorldScene(phase));
     }
-    DeltaSample Sample(uint64_t nowNs,int phase,float originalStep,bool enabled,bool world=false) {
+    // maxTicks: most game time one frame may advance. A hitch (effect loading on the first use of a special)
+    // must not be repaid in one big step, or scripted effect spawns of that window are lost.
+    DeltaSample Sample(uint64_t nowNs,int phase,float originalStep,bool enabled,bool world=false,double maxTicks=6.0) {
         const bool active=enabled&&Scene(phase,world)&&std::bit_cast<uint32_t>(originalStep)==0x3F800000;
         const bool restart=!primed||previousPhase!=phase||nowNs<=previous;
         const uint64_t elapsed=restart?0:nowNs-previous;
@@ -38,8 +40,9 @@ public:
         // Do not spend time accumulated during a load, suspend or scene change.
         if(restart||elapsed>250000000){out.reset=true;return out;}
         out.seconds=double(elapsed)*1e-9;
-        out.clamped=out.seconds>0.100;
-        out.ticks=float(std::min(out.seconds,0.100)*60.0);
+        const double limit=std::clamp(maxTicks,1.0,6.0);
+        out.clamped=out.seconds*60.0>limit;
+        out.ticks=float(std::min(out.seconds*60.0,limit));
         return out;
     }
 };
@@ -64,25 +67,6 @@ struct GuestDeltaPatch {
         owned=true;
     }
 };
-// Battle has a separate persistent speed/hit-stop scale. Temporarily scale
-// its input, let the ORIGINAL update derive the effective animation/physics
-// step, then restore only if guest scripts did not replace it themselves.
-struct BattleDeltaPatch {
-    bool owned=false;
-    uint32_t address=0, original=0, written=0;
-    template<class Read,class Write> void Apply(uint32_t at,float ticks,Read read,Write write) {
-        owned=false;address=at;original=read(at);
-        const float speed=std::bit_cast<float>(original);
-        if(!std::isfinite(speed)||speed<0||speed>8||!std::isfinite(ticks)||ticks<=0||ticks>6||ticks==1||speed==0)return;
-        written=std::bit_cast<uint32_t>(speed*ticks);
-        write(address,written);owned=true;
-    }
-    template<class Read,class Write> void Restore(Read read,Write write) {
-        if(owned&&read(address)==written)write(address,original);
-        owned=false;
-    }
-};
-
 // Own only effective time outputs, never the game's persistent speed controls.
 // Remember the exact ORIGINAL output at the write site, avoiding divide/rebase
 // roundoff and the previous-frame delta leaking into this frame's update.
