@@ -1,6 +1,7 @@
 # Auto-generated cvar configuration
-log_to_file = false
 clock_no_scaling = true
+log_to_file = false
+b3_deko_resolucao_saida = 1440
 input_vibracion = true
 switch_contador_fps = true
 input_vibracion_fuerza = 0.250000
@@ -11,5 +12,4 @@ b3_traducao_ptbr = true
 b3_deko_bloom = false
 b3_limite_fps_luta = 40
 b3_gpu_boost = true
-b3_deko_resolucao_interna = 0
 nfsmw_nativo_frontal_perezoso = false
